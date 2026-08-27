@@ -253,4 +253,28 @@ export interface NewSessionSpec {
   env?: Record<string, string>;
   cols?: number;
   rows?: number;
+  /** continue a past conversation instead of starting a fresh one (claude --resume / codex resume / opencode --session) */
+  resume?: boolean;
+  resume_id?: string;
+}
+
+/** A past agent conversation, read from the agent's own transcript on the machine. */
+export interface HistoryEntry {
+  type: AgentType;
+  session_id: string;
+  /** transcript file (or session json for opencode) */
+  path: string;
+  cwd: string;
+  /** last write to the transcript, epoch seconds */
+  mtime: number;
+  size: number;
+  resumable: boolean;
+  title?: string | null;
+  /** first prompt of the conversation */
+  prompt?: string | null;
+  last_prompt?: string | null;
+  created?: string | null;
+  last_ts?: string | null;
+  branch?: string | null;
+  model?: string | null;
 }

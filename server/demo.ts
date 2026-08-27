@@ -81,6 +81,22 @@ export function demoMachines(): { machines: MachineState[]; workspaces: Workspac
   return { machines: [gpu, jetson, laptop], workspaces };
 }
 
+/** Synthetic `history.list` answers so the demo shows resumable past conversations. */
+export function demoHistory(cwd: string) {
+  const t = now();
+  const rows: { type: 'claude' | 'codex'; session_id: string; title: string; prompt: string; ago: number; size: number; model: string; branch: string }[] = [
+    { type: 'claude', session_id: '5e1c0a9b-1', title: 'Deterministic data loader', prompt: 'Make the data loader deterministic under num_workers>0', ago: 40, size: 2.1e6, model: 'claude-opus-5', branch: 'fix/loader-seed' },
+    { type: 'claude', session_id: 'c31f77ae-9', title: 'Mixed-precision training pass', prompt: 'Switch the trainer to bf16 and check for loss spikes', ago: 26 * 3600, size: 5.4e6, model: 'claude-opus-5', branch: 'main' },
+    { type: 'codex', session_id: '0190-codex', title: 'Regenerate API docs', prompt: 'Regenerate the OpenAPI docs from the handlers', ago: 400, size: 0.9e6, model: 'gpt-5.6', branch: 'main' },
+    { type: 'claude', session_id: 'ab77e201-4', title: 'Flaky test hunt', prompt: 'tests/loader/test_shuffle.py fails once every ~20 runs — find out why', ago: 5 * 86400, size: 3.2e6, model: 'claude-sonnet-5', branch: 'main' },
+  ];
+  return rows.map((r) => ({
+    type: r.type, session_id: r.session_id, path: `${cwd}/.transcripts/${r.session_id}.jsonl`, cwd,
+    mtime: t - r.ago, size: r.size, resumable: true, title: r.title, prompt: r.prompt, last_prompt: r.prompt,
+    created: iso(r.ago + 3600), last_ts: iso(r.ago), branch: r.branch, model: r.model,
+  }));
+}
+
 /** Jitter resource numbers a little so the demo feels alive. */
 export function tickDemo(m: MachineState) {
   const r = m.resources;

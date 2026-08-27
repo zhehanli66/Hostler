@@ -110,6 +110,48 @@ check(d["status"] == "tool" and d["current_tool"]["name"] == "bash" and d["curre
 check(d["model"] == "model-z" and d["last_prompt"] == "Refactor the auth module", "opencode: model and prompt")
 check(len(d["subagents"]) == 1 and d["subagents"][0]["id"] == "ses_2", "opencode: child session via parentID")
 
+# ----------------------------------------------------------------- resuming an old conversation
+cwd_old = os.path.join(HOME, "proj", "old-app")
+os.makedirs(cwd_old)
+old_day = os.path.join(HOME, ".codex", "sessions", "2020", "01", "01")
+old_id = "01800000-0000-7000-8000-0000000000ff"
+jsonl(os.path.join(old_day, "rollout-2020-01-01T09-00-00-" + old_id + ".jsonl"), [
+    {"timestamp": "2020-01-01T09:00:00Z", "type": "session_meta", "payload": {"id": old_id, "cwd": cwd_old, "thread_source": "user"}},
+    {"timestamp": "2020-01-01T09:00:01Z", "type": "event_msg", "payload": {"type": "user_message", "message": "Old thread"}},
+])
+co_old = H.CodexIntrospector(cwd_old, started=time.time(), session_id=old_id); co_old.poll()
+check(co_old.path and old_id in co_old.path, "resume: codex finds a thread whose rollout predates the recent-day scan")
+jdump(os.path.join(st, "session", "p2", "ses_old.json"), {"id": "ses_old", "projectID": "p2", "directory": cwd_old, "title": "Old opencode", "time": {"created": 1, "updated": 1}})
+jdump(os.path.join(st, "session", "p2", "ses_new.json"), {"id": "ses_new", "projectID": "p2", "directory": cwd_old, "title": "Newer opencode", "time": {"created": now, "updated": now}})
+oc_old = H.OpenCodeIntrospector(cwd_old, started=time.time(), session_id="ses_old")
+check(oc_old.locate() and oc_old.session["title"] == "Old opencode", "resume: opencode goes straight to the named session, not the newest one")
+
+# ----------------------------------------------------------------- history (past conversations)
+h = H.list_history(cwd)
+by = dict((e["type"], e) for e in h)
+check(len(h) == 3 and set(by) == {"claude", "codex", "opencode"}, "history: one entry per agent transcript in the directory")
+check(by["claude"]["session_id"] == sid and by["claude"]["title"] == "Fix failing tests", "history: claude session id + ai title")
+check(by["claude"]["prompt"] == "Fix the failing tests" and by["claude"]["resumable"], "history: claude first prompt")
+check(by["codex"]["session_id"] == cx_id and by["codex"]["title"] == "Add README" and by["codex"]["prompt"] == "Add a README", "history: codex user thread (subagent thread excluded)")
+check(by["opencode"]["session_id"] == "ses_1" and by["opencode"]["title"] == "Refactor auth", "history: opencode session (child session excluded)")
+check([e["type"] for e in H.list_history(cwd, types=["claude"])] == ["claude"], "history: type filter")
+check(H.list_history(os.path.join(HOME, "proj")) == [], "history: directory without transcripts -> empty")
+check(H.strip_ide_context("# Context from my IDE setup:\n\n## Open tabs:\n- a.ts\n\n## My request:\nfix it\n") == "fix it", "history: IDE preamble stripped from prompt")
+
+# resuming a past conversation
+check(H.build_argv({"type": "claude", "resume": True, "resume_id": sid})[1] == "%s --resume %s" % (H.agent_binary("claude"), sid), "resume: claude --resume <id>")
+check(H.build_argv({"type": "claude", "cwd": cwd})[2]["claude_session_id"] not in (None, sid), "resume: fresh claude session gets a new --session-id")
+check(H.build_argv({"type": "codex", "resume": True, "resume_id": cx_id})[1] == "%s resume %s" % (H.agent_binary("codex"), cx_id), "resume: codex resume <id>")
+check(H.build_argv({"type": "opencode", "resume": True, "resume_id": "ses_1"})[1] == "%s --session ses_1" % H.agent_binary("opencode"), "resume: opencode --session <id>")
+
+# ----------------------------------------------------------------- session naming follows the agent
+check(ci.conversation_title() == "Fix failing tests" and co.conversation_title() == "Add README" and oc.conversation_title() == "Refactor auth",
+      "introspectors expose the conversation title for session naming")
+auto = H.Session("sid1", {"type": "claude", "cwd": cwd})
+named = H.Session("sid2", {"type": "claude", "cwd": cwd, "name": "my run"})
+check(auto.auto_name and auto.name == "Claude Code in demo-app", "an unnamed session starts with a readable default and follows the agent")
+check(not named.auto_name and named.name == "my run", "an explicitly named session keeps its name")
+
 # ----------------------------------------------------------------- CLIs bundled in an IDE extension
 ext = os.path.join(HOME, ".vscode", "extensions", "anthropic.claude-code-9.9.9-linux-x64", "resources", "native-binary")
 os.makedirs(ext)

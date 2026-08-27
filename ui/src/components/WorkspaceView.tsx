@@ -3,6 +3,7 @@ import type { MachineState, WorkspaceConfig } from '@shared/types';
 import { AppCtx } from '../App';
 import { api } from '../api';
 import { GitPanel } from './GitPanel';
+import { HistoryCard } from './History';
 import { SessionTable } from './SessionTable';
 import { classNames, fmtBytes, runningSubagents, sessionTone, shortPath } from '../util';
 import { Icon } from './icons';
@@ -56,6 +57,7 @@ export function WorkspaceView({ machine: m, path, workspace }: { machine: Machin
           <SessionTable machine={m} sessions={sessions} home={home} showDirectory={false} onOpen={(sid) => select({ machineId: m.config.id, workspace: path, sessionId: sid })}
             empty={<div className="empty"><Icon name="bot" size={22} /><div>No agents in {shortPath(path, home)} yet.</div>{connected && <button className="btn sm primary" onClick={() => openModal({ type: 'newAgent', machineId: m.config.id, cwd: path })}><Icon name="plus" size={13} /> New Agent here</button>}</div>} />
         </div>
+        <HistoryCard machine={m} cwd={path} />
         {connected ? <GitPanel machineId={m.config.id} cwd={path} /> : <div className="empty">not connected</div>}
       </div>
     </>

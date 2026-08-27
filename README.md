@@ -38,6 +38,9 @@ Machine  →  Workspace (a directory)  →  Agent (persistent PTY)  →  Subagen
   (the helper is a Linux child-subreaper and tags sessions through the environment).
 - **Adopt what's already running.** Discover Claude/Codex/OpenCode processes started elsewhere and manage them in one click
   (activity, processes, signals; terminal when they live in tmux).
+- **Resume past conversations.** Every workspace lists the Claude Code / Codex / OpenCode transcripts on that machine —
+  title, first prompt, branch, model, age — and one click continues one (`claude --resume`, `codex resume`,
+  `opencode --session`), including conversations that were never started from Hostler.
 - **Native terminal** (xterm.js) plus one-line input, `^C`, `Esc`; **Stop / Kill / Restart** (Claude Code restarts with
   `--resume`); **Git status & diff** per workspace; **CPU / RAM / GPU / VRAM** per machine (NVIDIA via `nvidia-smi`, Jetson via sysfs).
 - **Light and dark** themes, desktop app (Electron) or headless control plane + any browser.

@@ -48,7 +48,7 @@ import traceback
 import uuid
 from collections import OrderedDict, deque
 
-VERSION = "0.1.4"
+VERSION = "0.1.5"
 PROTOCOL = 1
 
 AM_DIR = os.environ.get("HOSTLER_DIR") or os.path.join(os.path.expanduser("~"), ".hostler")
@@ -214,6 +214,17 @@ BOOT_TIME = boot_time()
 
 def encode_claude_project(cwd):
     return re.sub(r"[^A-Za-z0-9]", "-", cwd)
+
+
+def strip_ide_context(msg):
+    """IDE clients (codex in VS Code) prepend an editor-context preamble to the user's prompt."""
+    if not msg:
+        return msg
+    if msg.startswith("# Context from my IDE setup:"):
+        m = re.search(r"^## My request:\s*\n(.*)$", msg, re.S | re.M)
+        if m:
+            return m.group(1).strip()
+    return re.sub(r"^# Context from my IDE setup:.*?(?=\n\n[^#\n])", "", msg, flags=re.S).strip() or msg.strip()
 
 
 def truncate(s, n):
@@ -863,7 +874,7 @@ class CodexConversation(Conversation):
             elif pt == "user_message":
                 msg = p.get("message") or ""
                 if msg.strip():
-                    self.last_prompt = re.sub(r"^# Context from my IDE setup:.*?(?=\n\n[^#\n])", "", msg, flags=re.S).strip() or msg.strip()
+                    self.last_prompt = strip_ide_context(msg)
                     self.turns += 1
                 self.last_role = "user"
             elif pt == "exec_command_begin":
@@ -975,6 +986,13 @@ class CodexIntrospector(object):
         if now - self.last_locate < 5:
             return False
         self.last_locate = now
+        if self.session_id:
+            hits = glob.glob(os.path.join(self.SESS_DIR, "*", "*", "*", "rollout-*%s.jsonl" % self.session_id))
+            if hits:
+                self.path = sorted(hits)[-1]
+                self.tail = Tail(self.path)
+                self.main.session_id = self.session_id
+                return True
         for mt, p in self._recent_files():
             meta = self._meta(p)
             if not meta:
@@ -1067,9 +1085,10 @@ class OpenCodeIntrospector(object):
     """Best-effort reader of ~/.local/share/opencode/storage (session / message / part JSON files)."""
     STORAGE = os.path.join(os.path.expanduser("~"), ".local", "share", "opencode", "storage")
 
-    def __init__(self, cwd, started=None):
+    def __init__(self, cwd, started=None, session_id=None):
         self.cwd = cwd
         self.started = started or 0
+        self.session_id = session_id
         self.session = None
         self.last_locate = 0
         self.last_poll = 0
@@ -1088,6 +1107,13 @@ class OpenCodeIntrospector(object):
         if now - self.last_locate < 5:
             return False
         self.last_locate = now
+        if self.session_id:
+            for p in glob.glob(os.path.join(self.STORAGE, "session", "*", self.session_id + ".json")):
+                s = self._load(p)
+                if s.get("id"):
+                    self.session = s
+                    self.session_path = p
+                    return True
         best = None
         for p in glob.glob(os.path.join(self.STORAGE, "session", "*", "*.json")):
             try:
@@ -1211,8 +1237,216 @@ def make_introspector(kind, cwd, started=None, session_id=None):
     if kind == "codex":
         return CodexIntrospector(cwd, started=started, session_id=session_id)
     if kind == "opencode":
-        return OpenCodeIntrospector(cwd, started=started)
+        return OpenCodeIntrospector(cwd, started=started, session_id=session_id)
     return None
+
+
+# --------------------------------------------------------------------------- transcript history
+#
+# Past conversations are the agents' own on-disk transcripts (the same files the
+# introspectors follow live). Listing them lets the UI offer `claude --resume`,
+# `codex resume` and `opencode --session` for work started days ago — or started
+# outside Hostler entirely.
+
+def _jsonl_head_tail(path, head=64 * 1024, tail=48 * 1024):
+    """(head_objs, tail_objs) of a possibly huge jsonl file, on whole-line boundaries."""
+    try:
+        size = os.path.getsize(path)
+        with open(path, "rb") as f:
+            h = f.read(min(size, head))
+            t = b""
+            if size > len(h) + 512:
+                f.seek(max(len(h), size - tail))
+                t = f.read()
+    except (OSError, IOError):
+        return [], []
+
+    def objs(chunk, drop_first, drop_last):
+        lines = chunk.decode("utf-8", "replace").splitlines()
+        if drop_first and lines:
+            lines = lines[1:]          # started mid-line
+        if drop_last and lines:
+            lines = lines[:-1]         # cut mid-line
+        out = []
+        for ln in lines:
+            ln = ln.strip()
+            if not ln.startswith("{"):
+                continue
+            try:
+                out.append(json.loads(ln))
+            except ValueError:
+                pass
+        return out
+
+    return objs(h, False, size > len(h)), objs(t, True, False)
+
+
+def _claude_user_text(o):
+    """Human prompt text of a claude transcript record, or None for tool results / slash-command noise."""
+    if o.get("isMeta"):
+        return None
+    c = (o.get("message") or {}).get("content")
+    if isinstance(c, str):
+        s = c.strip()
+    elif isinstance(c, list):
+        s = "\n".join(b.get("text") or "" for b in c if isinstance(b, dict) and b.get("type") == "text").strip()
+    else:
+        return None
+    return s if s and not s.startswith("<") else None
+
+
+def _claude_history(cwd, limit):
+    proj = os.path.join(os.path.expanduser("~"), ".claude", "projects", encode_claude_project(cwd))
+    out = []
+    for p in glob.glob(os.path.join(proj, "*.jsonl")):
+        try:
+            st = os.stat(p)
+        except OSError:
+            continue
+        head, tail = _jsonl_head_tail(p)
+        e = {"type": "claude", "session_id": os.path.basename(p)[:-6], "path": p, "cwd": cwd,
+             "mtime": st.st_mtime, "size": st.st_size, "resumable": True,
+             "title": None, "prompt": None, "last_prompt": None, "created": None, "last_ts": None,
+             "branch": None, "model": None}
+        for o in head:
+            t = o.get("type")
+            if e["created"] is None and o.get("timestamp"):
+                e["created"] = o["timestamp"]
+            if e["branch"] is None and o.get("gitBranch"):
+                e["branch"] = o["gitBranch"]
+            if t == "ai-title":
+                e["title"] = o.get("aiTitle") or e["title"]
+            elif t == "summary":
+                e["title"] = e["title"] or o.get("summary")
+            elif t == "user" and e["prompt"] is None:
+                e["prompt"] = _claude_user_text(o)
+        for o in tail:
+            t = o.get("type")
+            if o.get("timestamp"):
+                e["last_ts"] = o["timestamp"]
+            if t == "ai-title":
+                e["title"] = o.get("aiTitle") or e["title"]
+            elif t == "last-prompt":
+                e["last_prompt"] = o.get("lastPrompt") or e["last_prompt"]
+            elif t == "assistant":
+                e["model"] = (o.get("message") or {}).get("model") or e["model"]
+        out.append(e)
+    out.sort(key=lambda x: x["mtime"], reverse=True)
+    return out[:limit]
+
+
+def _codex_titles():
+    """id -> thread_name from the tail of ~/.codex/session_index.jsonl."""
+    idx = os.path.join(os.path.expanduser("~"), ".codex", "session_index.jsonl")
+    titles = {}
+    try:
+        with open(idx, "rb") as f:
+            f.seek(max(0, os.path.getsize(idx) - 512 * 1024))
+            for ln in f.read().decode("utf-8", "replace").splitlines():
+                try:
+                    o = json.loads(ln)
+                except ValueError:
+                    continue
+                if o.get("id") and o.get("thread_name"):
+                    titles[o["id"]] = o["thread_name"]
+    except (OSError, IOError):
+        pass
+    return titles
+
+
+def _codex_history(cwd, limit):
+    root = os.path.join(os.path.expanduser("~"), ".codex", "sessions")
+    titles = _codex_titles()
+    out = []
+    scanned = 0
+    for d in sorted(glob.glob(os.path.join(root, "*", "*", "*")), reverse=True):   # YYYY/MM/DD, newest first
+        if len(out) >= limit or scanned >= 600:
+            break
+        for p in sorted(glob.glob(os.path.join(d, "rollout-*.jsonl")), reverse=True):
+            if len(out) >= limit or scanned >= 600:
+                break
+            scanned += 1
+            try:
+                st = os.stat(p)
+            except OSError:
+                continue
+            head, tail = _jsonl_head_tail(p, head=32 * 1024, tail=16 * 1024)
+            meta = None
+            for o in head:
+                if o.get("type") == "session_meta":
+                    meta = o.get("payload") or {}
+                    break
+            if not meta or meta.get("parent_thread_id") or meta.get("thread_source", "user") != "user":
+                continue
+            if os.path.normpath(meta.get("cwd") or "") != cwd:
+                continue
+            e = {"type": "codex", "session_id": meta.get("id"), "path": p, "cwd": cwd,
+                 "mtime": st.st_mtime, "size": st.st_size, "resumable": bool(meta.get("id")),
+                 "title": titles.get(meta.get("id")), "prompt": None, "last_prompt": None,
+                 "created": meta.get("timestamp"), "last_ts": None, "branch": None, "model": None}
+            deep, _ = _jsonl_head_tail(p, head=512 * 1024, tail=0)
+            for o in deep:
+                pl = o.get("payload") or {}
+                if o.get("type") == "turn_context" and pl.get("model"):
+                    e["model"] = pl["model"]
+                if e["prompt"] is None and o.get("type") == "event_msg" and pl.get("type") == "user_message":
+                    e["prompt"] = strip_ide_context(pl.get("message") or "") or None
+            for o in tail:
+                if o.get("timestamp"):
+                    e["last_ts"] = o["timestamp"]
+                pl = o.get("payload") or {}
+                if o.get("type") == "event_msg" and pl.get("type") == "user_message":
+                    e["last_prompt"] = strip_ide_context(pl.get("message") or "") or e["last_prompt"]
+            out.append(e)
+    out.sort(key=lambda x: x["mtime"], reverse=True)
+    return out[:limit]
+
+
+def _opencode_history(cwd, limit):
+    storage = OpenCodeIntrospector.STORAGE
+    out = []
+    for p in glob.glob(os.path.join(storage, "session", "*", "*.json")):
+        try:
+            s = json.loads(read_file(p, "{}"))
+        except ValueError:
+            continue
+        if not isinstance(s, dict) or s.get("parentID") or not s.get("id"):
+            continue
+        if os.path.normpath(s.get("directory") or "") != cwd:
+            continue
+        t = s.get("time") or {}
+        updated = (t.get("updated") or t.get("created") or 0) / 1000.0
+        try:
+            size = os.path.getsize(p)
+        except OSError:
+            size = 0
+        out.append({"type": "opencode", "session_id": s["id"], "path": p, "cwd": cwd,
+                    "mtime": updated, "size": size, "resumable": True, "title": s.get("title"),
+                    "prompt": None, "last_prompt": None, "created": None, "last_ts": None,
+                    "branch": None, "model": None})
+    out.sort(key=lambda x: x["mtime"], reverse=True)
+    return out[:limit]
+
+
+def list_history(cwd, types=None, limit=40):
+    """Transcripts of past agent conversations in `cwd`, newest first."""
+    cwd = os.path.normpath(os.path.abspath(os.path.expanduser(cwd or "~")))
+    limit = max(1, min(int(limit or 40), 200))
+    out = []
+    for kind in (types or ["claude", "codex", "opencode"]):
+        fn = {"claude": _claude_history, "codex": _codex_history, "opencode": _opencode_history}.get(kind)
+        if not fn:
+            continue
+        try:
+            out.extend(fn(cwd, limit))
+        except Exception as e:
+            log("history %s in %s: %s", kind, cwd, e)
+    for e in out:
+        e["title"] = truncate(e.get("title"), 120)
+        e["prompt"] = truncate(e.get("prompt"), 300)
+        e["last_prompt"] = truncate(e.get("last_prompt"), 300)
+    out.sort(key=lambda x: x.get("mtime") or 0, reverse=True)
+    return out[:limit]
 
 
 # --------------------------------------------------------------------------- sessions
@@ -1330,7 +1564,7 @@ def build_argv(spec):
     extra = spec.get("args") or ""
     meta = {}
     if kind == "claude":
-        sid = spec.get("claude_session_id") or (spec.get("meta") or {}).get("claude_session_id") or str(uuid.uuid4())
+        sid = spec.get("claude_session_id") or spec.get("resume_id") or (spec.get("meta") or {}).get("claude_session_id") or str(uuid.uuid4())
         meta["claude_session_id"] = sid
         claude = agent_binary("claude")
         if spec.get("resume"):
@@ -1339,10 +1573,19 @@ def build_argv(spec):
             cmd = "%s --session-id %s %s" % (claude, shlex.quote(sid), extra)
     elif kind == "codex":
         codex = agent_binary("codex")
-        rs = spec.get("resume_id")
-        cmd = ("%s resume %s %s" % (codex, shlex.quote(rs), extra)) if (spec.get("resume") and rs) else ("%s %s" % (codex, extra))
+        if spec.get("resume") and rs:
+            meta["session_id"] = rs        # `codex resume` keeps writing the same rollout
+            cmd = "%s resume %s %s" % (codex, shlex.quote(rs), extra)
+        else:
+            cmd = "%s %s" % (codex, extra)
     elif kind == "opencode":
-        cmd = "%s %s" % (agent_binary("opencode"), extra)
+        rs = spec.get("resume_id")
+        opencode = agent_binary("opencode")
+        if spec.get("resume") and rs:
+            meta["session_id"] = rs
+            cmd = "%s --session %s %s" % (opencode, shlex.quote(rs), extra)
+        else:
+            cmd = "%s %s" % (opencode, extra)
     elif kind == "shell":
         cmd = None
     else:
@@ -2259,6 +2502,8 @@ class Server(object):
             return self.monitor.res.sample_system()
         if op == "tools.rescan":
             return self.monitor.rescan_tools()
+        if op == "history.list":
+            return list_history(req.get("cwd"), req.get("types"), req.get("limit") or 40)
         if op == "git.status":
             return git_status(os.path.expanduser(req.get("cwd") or "~"))
         if op == "git.diff":

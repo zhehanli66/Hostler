@@ -3,6 +3,7 @@ import type { AgentType, FsList, MachineState, SshHostEntry, WorkspaceConfig } f
 import { api, useAppState } from '../api';
 import { classNames, installCommand, shortPath, TYPE_LABEL } from '../util';
 import { Icon, TypeAvatar } from './icons';
+import { HistoryList, pastOnly, useHistory } from './History';
 
 export function Modal({ title, children, footer, onClose, wide }: { title: string; children: React.ReactNode; footer?: React.ReactNode; onClose: () => void; wide?: boolean }) {
   useEffect(() => { const k = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); }; window.addEventListener('keydown', k); return () => window.removeEventListener('keydown', k); }, [onClose]);
@@ -165,6 +166,8 @@ export function NewAgentModal({ machine, workspaces, cwd, onClose, onCreated }: 
   const [err, setErr] = useState('');
   const [busy, setBusy] = useState(false);
   const home = machine.hello?.home;
+  const history = useHistory(machine.config.id, dir, machine.status === 'connected');
+  const past = pastOnly(history.entries, machine.sessions);
   const submit = async () => {
     if (type === 'custom' && !command.trim()) { setErr('command is required'); return; }
     setBusy(true);
@@ -179,7 +182,8 @@ export function NewAgentModal({ machine, workspaces, cwd, onClose, onCreated }: 
     <Modal title={`New Agent on ${machine.config.name}`} onClose={onClose} wide footer={<><span className="err">{err}</span><button className="btn" onClick={onClose}>Cancel</button><button className="btn primary" disabled={busy} onClick={submit}><Icon name="play" size={14} /> Launch</button></>}>
       <div className="choice">
         {(['claude', 'codex', 'opencode', 'shell', 'custom'] as AgentType[]).map((t) => (
-          <button key={t} className={classNames(type === t && 'active')} disabled={!typeAvail(t)} onClick={() => setType(t)} title={typeAvail(t) ? '' : `${t} not found on ${machine.config.name}`}>
+          <button key={t} className={classNames(type === t && 'active')} disabled={!typeAvail(t)} onClick={() => setType(t)}
+            title={tools[t] || (typeAvail(t) ? '' : `${t} was not found on ${machine.config.name} — install the CLI there, or use Custom with the full path`)}>
             <TypeAvatar type={t} size={26} />{TYPE_LABEL[t]}<small>{t === 'claude' ? 'claude --session-id …' : t === 'codex' ? 'codex' : t === 'opencode' ? 'opencode' : t === 'shell' ? 'login shell' : 'any command'}{!typeAvail(t) ? ' · not installed' : ''}</small>
           </button>
         ))}
@@ -194,6 +198,12 @@ export function NewAgentModal({ machine, workspaces, cwd, onClose, onCreated }: 
         {type !== 'custom' && type !== 'shell' && <div className="field"><label>Extra CLI args</label><input value={args} placeholder={type === 'claude' ? '--model opus  --permission-mode acceptEdits …' : type === 'codex' ? '--full-auto  -m o3 …' : '…'} onChange={(e) => setArgs(e.target.value)} /></div>}
         {type === 'custom' && <div className="field"><label>Command</label><input value={command} placeholder="python train.py --epochs 10" onChange={(e) => setCommand(e.target.value)} /></div>}
       </div>
+      {past.length > 0 && (
+        <div className="field">
+          <label><Icon name="history" size={12} /> Or resume a past conversation in {shortPath(dir, home)}</label>
+          <HistoryList machine={machine} entries={past.slice(0, 5)} compact onResumed={onCreated} />
+        </div>
+      )}
       <div className="muted small">The command runs in a persistent PTY through your login shell on the machine (so PATH, nvm, auth and MCP config are exactly what you get in a normal terminal). It keeps running when you close this app or lose the SSH connection.</div>
     </Modal>
   );

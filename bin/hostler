@@ -5,6 +5,8 @@
 #   ./bin/hostler --dev    hot-reload dev mode (server + vite + electron in this terminal)
 set -e
 cd "$(dirname "$0")/.."
+# an Electron-hosted terminal (VS Code) exports this, which would make electron run as plain node
+unset ELECTRON_RUN_AS_NODE
 if [ ! -d node_modules ]; then echo "[hostler] installing dependencies..."; npm install; fi
 if [ "$1" = "--dev" ] || [ "$1" = "-d" ]; then exec npm run dev; fi
 if [ ! -f dist/.built ] || [ -n "$(find server ui/src ui/index.html shared electron helper package.json vite.config.ts -type f -newer dist/.built -print -quit 2>/dev/null)" ]; then

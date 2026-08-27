@@ -7,7 +7,20 @@ export default defineConfig({
   base: './',
   plugins: [react()],
   resolve: { alias: { '@shared': path.resolve(__dirname, 'shared') } },
-  build: { outDir: path.resolve(__dirname, 'dist/ui'), emptyOutDir: true, sourcemap: false },
+  build: {
+    outDir: path.resolve(__dirname, 'dist/ui'),
+    emptyOutDir: true,
+    sourcemap: false,
+    // xterm + react are big and change rarely: keep them out of the app chunk
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          react: ['react', 'react-dom', 'react-dom/client'],
+          xterm: ['@xterm/xterm', '@xterm/addon-fit', '@xterm/addon-web-links'],
+        },
+      },
+    },
+  },
   server: {
     port: 5173,
     strictPort: true,

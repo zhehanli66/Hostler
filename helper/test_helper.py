@@ -86,7 +86,9 @@ check("scrollback" in att, "attach returns scrollback (%d bytes)" % len(base64.b
 # wait for the shell prompt before typing (typeahead during zsh/oh-my-zsh init is unreliable)
 c.wait_event(lambda e: e.get("ev") == "output" and e.get("session") == sid and b"\x1b[?2004h" in base64.b64decode(e["data"]), timeout=6)
 time.sleep(0.3)
-c.call("session.input", session=sid, data=base64.b64encode(b"echo MARKER_$((40+2)); sleep 30 & sleep 0.2; setsid sleep 31 & disown; echo DONE\n").decode())
+# sentinels are computed by the shell so the echoed input line can never match the awaited output (bash echoes
+# the typed line followed by \r\n, zsh redraws it; both would otherwise produce a false "DONE\r\n" early)
+c.call("session.input", session=sid, data=base64.b64encode(b"echo MARK''ER_$((40+2)); sleep 30 & sleep 0.2; setsid sleep 31 & disown; echo D''ONE\n").decode())
 got = b""
 deadline = time.time() + 8
 while time.time() < deadline and b"DONE\r\n" not in got:

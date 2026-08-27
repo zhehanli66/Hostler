@@ -1418,7 +1418,7 @@ def _slurm_partitions(limit=400):
         if p is None:
             p = parts[name] = {"name": name, "default": raw.endswith("*"), "avail": f[1].strip(), "nodes": 0,
                                "states": OrderedDict(), "cpus": None, "gres": None, "limit": None,
-                               "gpus": {"alloc": 0, "idle": 0, "total": 0}}
+                               "gpus": {"alloc": 0, "idle": 0, "total": 0}, "mem": None, "nodes_avail": None}
         nodes = int(f[2]) if f[2].strip().isdigit() else 0
         state = f[3].strip().rstrip("*~#$@")          # idle~ / down* are still idle / down
         p["nodes"] += nodes
@@ -1439,7 +1439,8 @@ def _slurm_partitions(limit=400):
 
 
 def _slurm_gpus(parts, limit=4000):
-    """GPUs per partition: totals from the node list, allocation from the running jobs."""
+    """Fallback when the per-node query is unavailable: GPU totals from the node list (allocation then
+    comes from the running jobs' gres requests, see _slurm_queue)."""
     out, _ = _sched_run("sinfo", ["-h", "-N", "-o", "%P|%T|%G"])
     for line in out.splitlines()[:limit]:
         f = line.split("|")
@@ -1454,8 +1455,177 @@ def _slurm_gpus(parts, limit=4000):
             p["gpus"]["idle"] += n
 
 
-def _slurm_queue(parts, limit=20000):
-    """Cluster-wide queue depth, and GPUs the running jobs hold, in one squeue call."""
+# Node states whose resources cannot be handed to a job right now. "idle~" (cloud node powered
+# down) and "idle#" (powering up) stay usable: the scheduler brings those up for a job.
+UNUSABLE_NODE_STATES = set("down drain drained draining drng fail failg failing maint unk unknown error future inval invalid "
+                           "resv reserved planned plnd power_down powered_down powering_down pow_dn perfctrs".split())
+
+
+def _node_usable(state):
+    s = (state or "").strip()
+    if s.endswith("*") or "$" in s:        # not responding / maintenance reservation
+        return False
+    return s.rstrip("*~#$@!-+").lower() not in UNUSABLE_NODE_STATES
+
+
+def _int0(x):
+    try:
+        return int(float(x))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _empty_capacity():
+    return {"nodes": {"total": 0, "idle": 0, "avail": 0},
+            "cpus": {"alloc": 0, "idle": 0, "other": 0, "total": 0},
+            "gpus": {"alloc": 0, "idle": 0, "total": 0},
+            "mem": {"alloc": 0, "avail": 0, "total": 0}}
+
+
+def _fold_node(acc, row):
+    """Add one node's capacity. `total` counts everything the partition owns; `alloc` what jobs hold;
+    `idle`/`avail` only what a job could get now — a down or drained node contributes to neither."""
+    usable = row["usable"]
+    n = acc["nodes"]
+    n["total"] += 1
+    n["avail"] += 1 if usable else 0
+    n["idle"] += 1 if usable and row["state"] == "idle" else 0
+    c = acc["cpus"]
+    c["alloc"] += row["cpu_alloc"]
+    c["total"] += row["cpu_total"]
+    if usable:
+        c["idle"] += row["cpu_idle"]
+        c["other"] += row["cpu_other"]
+    else:
+        c["other"] += row["cpu_total"] - row["cpu_alloc"]
+    g = acc["gpus"]
+    g["alloc"] += row["gpu_used"]
+    g["total"] += row["gpu_total"]
+    g["idle"] += (row["gpu_total"] - row["gpu_used"]) if usable else 0
+    m = acc["mem"]
+    m["alloc"] += row["mem_alloc"]
+    m["total"] += row["mem_total"]
+    m["avail"] += (row["mem_total"] - row["mem_alloc"]) if usable else 0
+
+
+def _count_ids(spec):
+    """'0,2-3,28-35' -> 12 (a CpuSpecList)."""
+    n = 0
+    for chunk in (spec or "").split(","):
+        m = re.match(r"^\s*(\d+)(?:-(\d+))?\s*$", chunk)
+        if m:
+            n += (int(m.group(2)) - int(m.group(1)) + 1) if m.group(2) else 1
+    return n
+
+
+def _tres_gpu(tres):
+    """gres/gpu=4 (or gres/gpu:a100=4) inside a CfgTRES / AllocTRES string."""
+    return sum(int(x) for x in re.findall(r"gres/gpu(?::[^=,]+)?=(\d+)", tres or ""))
+
+
+SCONTROL_UNUSABLE_BASE = set("DOWN ERROR FUTURE UNKNOWN FAIL INVAL INVALID".split())
+SCONTROL_UNUSABLE_FLAGS = set("DRAIN NOT_RESPONDING RESERVED MAINTENANCE FAIL INVALID_REG POWERING_DOWN POWER_DOWN PERFCTRS PLANNED".split())
+
+
+def _scontrol_usable(state):
+    """'MIXED', 'IDLE+DRAIN', 'DOWN+NOT_RESPONDING', 'IDLE+CLOUD+POWERED_DOWN' (usable: the scheduler powers it up)."""
+    parts = (state or "").upper().split("+")
+    base = parts[0].rstrip("*~#$@!-+")
+    return base not in SCONTROL_UNUSABLE_BASE and not (set(parts[1:]) & SCONTROL_UNUSABLE_FLAGS)
+
+
+def _scontrol_node_rows(limit=20000):
+    """(node, [partitions], row) from `scontrol -o -d show node`.
+
+    The most precise picture: unlike `sinfo`, it knows about *specialized* cores and memory
+    (CoreSpecCount / CpuSpecList / MemSpecLimit — capacity slurm keeps for the OS and never
+    hands to a job; `sinfo` still counts those CPUs as idle, which is why it shows more CPUs than
+    the scheduler can actually allocate). Totals here are what slurm can allocate (CPUEfctv).
+    """
+    out, err = _sched_run("scontrol", ["-o", "-d", "show", "node"], timeout=20)
+    rows = []
+    for line in out.splitlines()[:limit]:
+        d = dict(re.findall(r"(\w+)=(\S*)", line))     # values with spaces (OS=, Reason=) lose their tail; none of those are read
+        name = d.get("NodeName")
+        if not name:
+            continue
+        cpu_tot = _int0(d.get("CPUTot"))
+        if d.get("CPUEfctv"):
+            cpu_eff = _int0(d["CPUEfctv"])
+        else:   # before slurm 22.05: derive it
+            spec = _count_ids(d.get("CPUSpecList")) or _int0(d.get("CoreSpecCount")) * max(1, _int0(d.get("ThreadsPerCore")))
+            cpu_eff = max(0, cpu_tot - spec)
+        cpu_alloc = min(cpu_eff, _int0(d.get("CPUAlloc")))
+        g_total = _gres_count(d.get("Gres")) or _tres_gpu(d.get("CfgTRES"))
+        g_used = _gres_count(d.get("GresUsed")) if d.get("GresUsed") else _tres_gpu(d.get("AllocTRES"))
+        mem_total = max(0, _int0(d.get("RealMemory")) - _int0(d.get("MemSpecLimit")))
+        mem_alloc = min(mem_total, _int0(d.get("AllocMem")))
+        state = d.get("State", "")
+        row = {"state": state.split("+")[0].rstrip("*~#$@!-+").lower(), "usable": _scontrol_usable(state),
+               "cpu_alloc": cpu_alloc, "cpu_idle": cpu_eff - cpu_alloc, "cpu_other": 0, "cpu_total": cpu_eff,
+               "gpu_total": g_total, "gpu_used": min(g_total, g_used),
+               "mem_total": mem_total * 1024 * 1024, "mem_alloc": mem_alloc * 1024 * 1024}
+        rows.append((name, [p for p in d.get("Partitions", "").split(",") if p], row))
+    return rows, err
+
+
+def _sinfo_node_rows(limit=20000):
+    """(node, [partition], row) from `sinfo -N`: the fallback when scontrol is unavailable. Specialized
+    cores are invisible here, so CPU totals may exceed what slurm can allocate."""
+    out, err = _sched_run("sinfo", ["-h", "-N", "-O", "NodeList:64,Partition:64,StateCompact:32,CPUsState:32,Gres:160,GresUsed:160,Memory:24,AllocMem:24"], timeout=20)
+    rows = []
+    for line in out.splitlines()[:limit]:
+        f = line.split()
+        if len(f) < 8:
+            continue
+        node, part, state, cpus, gres, gres_used, mem, mem_alloc = f[:8]
+        try:
+            a, i, o, t = [int(x) for x in cpus.split("/")]
+        except ValueError:
+            a = i = o = t = 0
+        g_total = _gres_count(gres)
+        m_total = _int0(mem)
+        row = {"state": state.rstrip("*~#$@!-+").lower(), "usable": _node_usable(state),
+               "cpu_alloc": a, "cpu_idle": i, "cpu_other": o, "cpu_total": t,
+               "gpu_total": g_total, "gpu_used": min(g_total, _gres_count(gres_used)),
+               "mem_total": m_total * 1024 * 1024, "mem_alloc": min(m_total, _int0(mem_alloc)) * 1024 * 1024}
+        rows.append((node, [part.rstrip("*")], row))
+    return rows, err
+
+
+def _slurm_nodes(parts):
+    """Per-node capacity folded into each partition (a node in several partitions counts in each)
+    and, de-duplicated by node name, into cluster-wide totals. Returns (totals, error) — totals is
+    None when neither scontrol nor `sinfo -N` could be read, so the caller falls back to the
+    coarser per-partition queries."""
+    rows, err = _scontrol_node_rows()
+    if not rows:
+        rows, err = _sinfo_node_rows()
+    per_part = {}
+    seen = {}
+    for node, pnames, row in rows:
+        for pname in pnames:
+            if pname in parts:
+                _fold_node(per_part.setdefault(pname, _empty_capacity()), row)
+        if node not in seen:
+            seen[node] = row
+    if not seen:
+        return None, err
+    for pname, cap in per_part.items():
+        p = parts[pname]
+        p["cpus"] = cap["cpus"]
+        p["gpus"] = cap["gpus"]
+        p["mem"] = cap["mem"]
+        p["nodes_avail"] = cap["nodes"]["avail"]
+    totals = _empty_capacity()
+    for row in seen.values():
+        _fold_node(totals, row)
+    return totals, err
+
+
+def _slurm_queue(parts, limit=20000, gpu_from_jobs=False):
+    """Cluster-wide queue depth in one squeue call. With gpu_from_jobs (old Slurm without GresUsed),
+    the running jobs' per-node gres requests stand in for the GPU allocation."""
     summary = {"running": 0, "pending": 0, "other": 0}
     out, _ = _sched_run("squeue", ["-h", "-a", "-o", "%T|%P|%b"], timeout=20)
     for line in out.splitlines()[:limit]:
@@ -1463,7 +1633,7 @@ def _slurm_queue(parts, limit=20000):
         state = f[0].strip().upper()
         if state.startswith("R"):
             summary["running"] += 1
-            if len(f) > 2:
+            if gpu_from_jobs and len(f) > 2:
                 p = parts.get(f[1].strip().rstrip("*"))
                 if p:
                     p["gpus"]["alloc"] += _gres_count(f[2])
@@ -1511,23 +1681,34 @@ def _slurm_recent(limit=25):
 
 def _slurm_status():
     parts, err = _slurm_partitions()
+    totals = None
     try:
-        _slurm_gpus(parts)
+        totals, _ = _slurm_nodes(parts)
     except Exception:
         log("sinfo node scan failed: %s", traceback.format_exc())
+    if totals is None:
+        try:
+            _slurm_gpus(parts)
+        except Exception:
+            log("sinfo gres scan failed: %s", traceback.format_exc())
     try:
-        queue = _slurm_queue(parts)
+        queue = _slurm_queue(parts, gpu_from_jobs=totals is None)
     except Exception:
         queue = {"running": 0, "pending": 0, "other": 0}
     jobs, jerr = _slurm_jobs()
     partitions = list(parts.values())
-    nodes = {"total": sum(p["nodes"] for p in partitions), "idle": sum(p["states"].get("idle", 0) for p in partitions)}
-    gpus = {"total": sum(p["gpus"]["total"] for p in partitions), "alloc": sum(p["gpus"]["alloc"] for p in partitions)}
+    if totals is not None:
+        summary = {"nodes": totals["nodes"], "cpus": totals["cpus"], "gpus": totals["gpus"], "mem": totals["mem"]}
+    else:
+        # per-partition sums: a node in several partitions is counted once per partition here
+        summary = {"nodes": {"total": sum(p["nodes"] for p in partitions), "idle": sum(p["states"].get("idle", 0) for p in partitions)},
+                   "gpus": {"total": sum(p["gpus"]["total"] for p in partitions), "alloc": sum(p["gpus"]["alloc"] for p in partitions),
+                            "idle": sum(p["gpus"]["idle"] for p in partitions)}}
+    summary["queue"] = queue
+    summary["mine"] = {"running": len([j for j in jobs if j["state"].upper().startswith("R")]),
+                       "pending": len([j for j in jobs if j["state"].upper().startswith("P")])}
     return {"kind": "slurm", "partitions": partitions, "jobs": jobs, "recent": _slurm_recent(),
-            "summary": {"nodes": nodes, "gpus": gpus, "queue": queue,
-                        "mine": {"running": len([j for j in jobs if j["state"].upper().startswith("R")]),
-                                 "pending": len([j for j in jobs if j["state"].upper().startswith("P")])}},
-            "error": truncate(err or jerr, 200) or None}
+            "summary": summary, "error": truncate(err or jerr, 200) or None}
 
 
 def _login_name():

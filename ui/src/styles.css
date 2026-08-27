@@ -162,6 +162,11 @@ svg { flex: none; }
 .bar > i { display: block; height: 100%; background: linear-gradient(90deg, var(--accent-2), var(--accent)); border-radius: 3px; transition: width .5s; }
 .bar.warn > i { background: var(--busy); } .bar.crit > i { background: var(--error); }
 .bar.mem > i { background: var(--purple); } .bar.gpu > i { background: var(--idle); }
+/* two segments: allocated, then capacity nobody can get (down / drained nodes) */
+.bar.split { display: flex; }
+.bar.split > i { border-radius: 0; }
+.bar.split > i.off { background: var(--fg-3); opacity: .35; }
+.part-meter .v { width: 68px; white-space: nowrap; }
 
 .tbl-wrap { overflow-x: auto; max-width: 100%; }
 table.tbl { width: 100%; border-collapse: collapse; font-size: 12.5px; }

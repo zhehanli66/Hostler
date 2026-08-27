@@ -66,9 +66,15 @@ export interface ClusterPartition {
   nodes: number;
   /** node count per scheduler state: idle / mixed / allocated / down … */
   states: Record<string, number>;
+  /** nodes a job could be scheduled on now (not down / drained / reserved) */
+  nodes_avail?: number | null;
+  /** `total` is everything the partition owns, `alloc` what jobs hold, `idle` what a job could get now
+   *  (only on usable nodes); `other` = CPUs on down / drained nodes and otherwise unusable ones */
   cpus?: { alloc: number; idle: number; other: number; total: number } | null;
-  /** total from the node list, alloc from the running jobs */
+  /** same meaning: total / alloc (gres in use) / idle = available on usable nodes */
   gpus?: { alloc: number; idle: number; total: number };
+  /** bytes: configured / allocated to jobs / available on usable nodes */
+  mem?: { alloc: number; avail: number; total: number } | null;
   gres?: string | null;
   /** the partition's max wall time */
   limit?: string | null;
@@ -86,9 +92,13 @@ export interface ClusterJob {
 
 export interface ClusterRecentJob { id: string; name: string; partition: string; state: string; elapsed: string; exit: string; end: string }
 
+/** Cluster-wide, each node counted once even when it sits in several partitions. */
 export interface ClusterSummary {
-  nodes: { total: number; idle: number };
-  gpus: { total: number; alloc: number };
+  nodes: { total: number; idle: number; avail?: number };
+  /** idle = available now (usable nodes only); absent on old Slurm without per-node gres usage */
+  gpus: { total: number; alloc: number; idle?: number };
+  cpus?: { total: number; alloc: number; idle: number; other: number };
+  mem?: { total: number; alloc: number; avail: number };
   /** the whole cluster's queue, all users */
   queue: { running: number; pending: number; other: number };
   mine: { running: number; pending: number };

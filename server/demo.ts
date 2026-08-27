@@ -104,10 +104,11 @@ export function demoMachines(): { machines: MachineState[]; workspaces: Workspac
 export function demoCluster() {
   return {
     kind: 'slurm',
+    // total = what the partition owns, alloc = held by jobs, idle/avail = what a job could get now (the 2 down gpu nodes count in neither)
     partitions: [
-      { name: 'gpu', default: true, avail: 'up', nodes: 18, states: { idle: 4, mixed: 12, down: 2 }, cpus: { alloc: 380, idle: 644, other: 128, total: 1152 }, gpus: { alloc: 46, idle: 16, total: 72 }, gres: 'gpu:a100:4', limit: '2-00:00:00' },
-      { name: 'cpu', default: false, avail: 'up', nodes: 48, states: { allocated: 40, idle: 8 }, cpus: { alloc: 2560, idle: 512, other: 0, total: 3072 }, gpus: { alloc: 0, idle: 0, total: 0 }, gres: null, limit: '7-00:00:00' },
-      { name: 'debug', default: false, avail: 'up', nodes: 2, states: { idle: 2 }, cpus: { alloc: 0, idle: 128, other: 0, total: 128 }, gpus: { alloc: 0, idle: 8, total: 8 }, gres: 'gpu:a100:4', limit: '30:00' },
+      { name: 'gpu', default: true, avail: 'up', nodes: 18, nodes_avail: 16, states: { idle: 4, mixed: 12, down: 2 }, cpus: { alloc: 380, idle: 644, other: 128, total: 1152 }, gpus: { alloc: 46, idle: 18, total: 72 }, mem: { alloc: 5.2e12, avail: 3.0e12, total: 9.2e12 }, gres: 'gpu:a100:4', limit: '2-00:00:00' },
+      { name: 'cpu', default: false, avail: 'up', nodes: 48, nodes_avail: 48, states: { allocated: 40, idle: 8 }, cpus: { alloc: 2560, idle: 512, other: 0, total: 3072 }, gpus: { alloc: 0, idle: 0, total: 0 }, mem: { alloc: 9.8e12, avail: 2.5e12, total: 12.3e12 }, gres: null, limit: '7-00:00:00' },
+      { name: 'debug', default: false, avail: 'up', nodes: 2, nodes_avail: 2, states: { idle: 2 }, cpus: { alloc: 0, idle: 128, other: 0, total: 128 }, gpus: { alloc: 0, idle: 8, total: 8 }, mem: { alloc: 0, avail: 1.0e12, total: 1.0e12 }, gres: 'gpu:a100:4', limit: '30:00' },
     ],
     jobs: [
       { id: '1842317', partition: 'gpu', name: 'train-resnet-seed3', state: 'RUNNING', time: '4:21:07', limit: '1-00:00:00', nodes: 1, reason: 'node[07]', cpus: 32, gpus: 4, nodelist: 'node07', submitted: '2026-08-27T18:02:11' },
@@ -119,8 +120,10 @@ export function demoCluster() {
       { id: '1842290', name: 'preprocess-shards', partition: 'cpu', state: 'COMPLETED', elapsed: '00:18:44', exit: '0:0', end: '2026-08-27T20:11:02' },
     ],
     summary: {
-      nodes: { total: 68, idle: 14 },
-      gpus: { total: 80, alloc: 46 },
+      nodes: { total: 68, idle: 14, avail: 66 },
+      cpus: { total: 4352, alloc: 2940, idle: 1284, other: 128 },
+      gpus: { total: 80, alloc: 46, idle: 26 },
+      mem: { total: 22.5e12, alloc: 15.0e12, avail: 6.5e12 },
       queue: { running: 214, pending: 87, other: 3 },
       mine: { running: 2, pending: 1 },
     },

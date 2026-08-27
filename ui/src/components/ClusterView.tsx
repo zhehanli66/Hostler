@@ -2,7 +2,7 @@ import React, { useContext, useEffect, useState } from 'react';
 import type { ClusterJobDetail, ClusterPartition, ClusterStatus, MachineState, SessionInfo } from '@shared/types';
 import { AppCtx } from '../App';
 import { api } from '../api';
-import { classNames, pct, shq } from '../util';
+import { classNames, fmtBytes, shq } from '../util';
 import { Icon } from './icons';
 
 /** Poll the scheduler for as long as the view is on screen. */
@@ -27,6 +27,9 @@ export function useCluster(machineId: string, enabled: boolean, everyMs = 20000)
   return { status, error, busy, reload: load };
 }
 
+/** "931 GB" -> "931G": the tile meters have room for a number and a unit letter */
+const compactBytes = (n: number) => fmtBytes(n, 0).replace(/ ([KMGT])B$/, '$1');
+
 const jobTone = (state: string) => (/^R/i.test(state) ? 'idle' : /^(PD|P)/i.test(state) ? 'busy' : /^(F|NF|TO|CA|OOM|BF|DL)/i.test(state) ? 'error' : 'muted');
 
 /** Elapsed against the job's wall-time limit, as a fraction (Slurm formats: d-hh:mm:ss). */
@@ -38,10 +41,34 @@ function slurmSeconds(t?: string): number | null {
   return (+(d || 0) * 86400) + (+(h || 0) * 3600) + (+mm * 60) + +ss;
 }
 
+/**
+ * One resource line of a partition tile. Three numbers that are not the same thing: `total` is what the
+ * partition owns, `alloc` what jobs hold, `avail` what a job could get *now* — the gap between them is
+ * capacity on down / drained / reserved nodes, drawn as the dim second segment of the bar.
+ */
+function Meter({ k, cls, total, alloc, avail, fmt = String }: { k: string; cls?: string; total?: number | null; alloc?: number | null; avail?: number | null; fmt?: (n: number) => string }) {
+  if (total == null) {
+    return <div className="part-meter"><span className="k">{k}</span><span className="bar split" /><span className="v">–</span></div>;
+  }
+  const a = alloc ?? 0;
+  const av = avail ?? Math.max(0, total - a);
+  const off = Math.max(0, total - a - av);
+  const allocPct = total ? Math.min(100, (100 * a) / total) : 0;
+  const offPct = total ? Math.min(100 - allocPct, (100 * off) / total) : 0;
+  const busy = total ? (100 * (total - av)) / total : 0;
+  const title = `${k.toUpperCase()}: ${fmt(av)} available of ${fmt(total)} — ${fmt(a)} allocated to jobs${off ? `, ${fmt(off)} on down / drained / reserved nodes` : ''}`;
+  return (
+    <div className="part-meter" title={title}>
+      <span className="k">{k}</span>
+      <span className={classNames('bar split', cls, busy > 90 ? 'crit' : busy > 75 ? 'warn' : '')}><i style={{ width: `${allocPct}%` }} /><i className="off" style={{ width: `${offPct}%` }} /></span>
+      <span className="v">{fmt(av)} avail</span>
+    </div>
+  );
+}
+
 export function PartitionTile({ p }: { p: ClusterPartition }) {
   const idle = p.states.idle || 0;
-  const cpuUsed = p.cpus && p.cpus.total ? pct(p.cpus.alloc, p.cpus.total) : 0;
-  const gpuUsed = p.gpus && p.gpus.total ? pct(p.gpus.alloc, p.gpus.total) : 0;
+  const unavailable = p.nodes_avail != null ? Math.max(0, p.nodes - p.nodes_avail) : 0;
   const detail = Object.keys(p.states).map((k) => `${p.states[k]} ${k}`).join(' · ');
   return (
     <div className="gauge">
@@ -49,19 +76,10 @@ export function PartitionTile({ p }: { p: ClusterPartition }) {
         <span title={p.default ? 'default partition' : ''}><Icon name="server" size={12} /> {p.name}{p.default ? '*' : ''}</span>
         <span>{p.avail === 'up' ? (p.limit || '') : p.avail}</span>
       </div>
-      <div className="value">{idle}<small>of {p.nodes} nodes idle</small></div>
-      <div className="part-meter" title={`CPU ${p.cpus?.alloc ?? 0} of ${p.cpus?.total ?? 0} allocated`}>
-        <span className="k">cpu</span>
-        <span className={classNames('bar', cpuUsed > 90 ? 'crit' : cpuUsed > 75 ? 'warn' : '')}><i style={{ width: `${Math.min(100, cpuUsed)}%` }} /></span>
-        <span className="v">{p.cpus ? `${p.cpus.idle} free` : '–'}</span>
-      </div>
-      {p.gpus && p.gpus.total > 0 && (
-        <div className="part-meter" title={`GPU ${p.gpus.alloc} of ${p.gpus.total} allocated`}>
-          <span className="k">gpu</span>
-          <span className={classNames('bar gpu', gpuUsed > 90 ? 'crit' : gpuUsed > 75 ? 'warn' : '')}><i style={{ width: `${Math.min(100, gpuUsed)}%` }} /></span>
-          <span className="v">{p.gpus.total - p.gpus.alloc} free</span>
-        </div>
-      )}
+      <div className="value" title={unavailable ? `${unavailable} of ${p.nodes} nodes are down / drained / reserved` : ''}>{idle}<small>of {p.nodes} nodes idle</small></div>
+      <Meter k="cpu" total={p.cpus?.total} alloc={p.cpus?.alloc} avail={p.cpus?.idle} />
+      {p.gpus && p.gpus.total > 0 && <Meter k="gpu" cls="gpu" total={p.gpus.total} alloc={p.gpus.alloc} avail={p.gpus.idle} />}
+      {p.mem && p.mem.total > 0 && <Meter k="mem" cls="mem" total={p.mem.total} alloc={p.mem.alloc} avail={p.mem.avail} fmt={compactBytes} />}
       <div className="sub" title={`${detail}${p.gres ? ` · ${p.gres}` : ''}`}>{detail}{p.gres ? ` · ${p.gres}` : ''}</div>
     </div>
   );
@@ -113,9 +131,11 @@ export function ClusterView({ machine: m }: { machine: MachineState }) {
             {status?.unsupported && <div className="banner warn"><Icon name="alert" size={15} /><div>{kind} is installed here, but Hostler only reads Slurm queues so far.</div></div>}
 
             {s && (
-              <div className="stats" style={{ marginBottom: 14 }}>
-                <span className="stat"><Icon name="server" size={12} /><b>{s.nodes.idle}</b> of {s.nodes.total} nodes idle</span>
-                {s.gpus.total > 0 && <span className="stat"><Icon name="gpu" size={12} /><b>{s.gpus.total - s.gpus.alloc}</b> of {s.gpus.total} GPUs free</span>}
+              <div className="stats" style={{ marginBottom: 14 }} title="cluster-wide, every node counted once">
+                <span className="stat" title={s.nodes.avail != null ? `${s.nodes.avail} of ${s.nodes.total} nodes usable (${s.nodes.total - s.nodes.avail} down / drained / reserved)` : ''}><Icon name="server" size={12} /><b>{s.nodes.idle}</b> of {s.nodes.total} nodes idle</span>
+                {s.cpus && s.cpus.total > 0 && <span className="stat" title={`${s.cpus.alloc} allocated · ${s.cpus.other} unusable`}><Icon name="cpu" size={12} /><b>{s.cpus.idle}</b> of {s.cpus.total} CPUs available</span>}
+                {s.gpus.total > 0 && <span className="stat" title={`${s.gpus.alloc} allocated`}><Icon name="gpu" size={12} /><b>{s.gpus.idle ?? Math.max(0, s.gpus.total - s.gpus.alloc)}</b> of {s.gpus.total} GPUs available</span>}
+                {s.mem && s.mem.total > 0 && <span className="stat" title={`${fmtBytes(s.mem.alloc, 0)} allocated`}><Icon name="memory" size={12} /><b>{fmtBytes(s.mem.avail, 0)}</b> of {fmtBytes(s.mem.total, 0)} memory available</span>}
                 <span className="stat"><Icon name="activity" size={12} /><b>{s.queue.running}</b> jobs running cluster-wide</span>
                 <span className="stat"><Icon name="clock" size={12} /><b>{s.queue.pending}</b> queued</span>
                 <span className="stat"><Icon name="bot" size={12} /><b>{s.mine.running}</b> yours running{s.mine.pending ? ` · ${s.mine.pending} pending` : ''}</span>

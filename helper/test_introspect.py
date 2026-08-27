@@ -193,17 +193,70 @@ def fake(name, body):
     with open(p, "w") as f:
         f.write("#!/bin/sh\n" + body)
     os.chmod(p, 0o755)
-fake("sinfo", "cat <<'OUT'\ngpu*|up|4|idle|0/256/0/256|gpu:a100:4\ngpu*|up|12|mixed|380/388/0/768|gpu:a100:4\ngpu*|up|2|down*|0/0/128/128|gpu:a100:4\ncpu|up|8|idle|0/512/0/512|(null)\nOUT\n")
+# partition summary rows (sinfo -o), and one row per node x partition (sinfo -N -O): node n3 is down, n4 sits in both partitions
+PART_ROWS = "gpu*|up|1|idle|0/64/0/64|gpu:a100:4\ngpu*|up|2|mixed|60/68/0/128|gpu:a100:4\ngpu*|up|1|down*|0/0/64/64|gpu:a100:4\ncpu|up|2|idle|0/128/0/128|(null)\n"
+NODE_ROWS = ("n1 gpu* idle 0/64/0/64 gpu:a100:4 gpu:a100:0(IDX:N/A) 512000 0\n"
+             "n2 gpu* mixed 30/34/0/64 gpu:a100:4 gpu:a100:3(IDX:0-2) 512000 256000\n"
+             "n4 gpu* mixed 30/34/0/64 gpu:a100:4 gpu:a100:1(IDX:0) 512000 128000\n"
+             "n3 gpu* down* 0/0/64/64 gpu:a100:4 gpu:a100:0(IDX:N/A) 512000 0\n"
+             "n4 cpu mixed 30/34/0/64 gpu:a100:4 gpu:a100:1(IDX:0) 512000 128000\n"
+             "n5 cpu idle 0/64/0/64 (null) (null) 256000 0\n")
+fake("sinfo", "case \"$*\" in *-N*) cat <<'OUT'\n%sOUT\n;; *) cat <<'OUT'\n%sOUT\n;; esac\n" % (NODE_ROWS, PART_ROWS))
 fake("squeue", "cat <<'OUT'\n1842317|gpu|train-resnet|RUNNING|4:21:07|1-00:00:00|1|node[07]\n1842401|gpu|sweep-lr|PENDING|0:00|8:00:00|2|(Resources)\nOUT\n")
 os.environ["PATH"] = bindir + os.pathsep + os.environ["PATH"]
 c = H.detect_cluster()
 check(c and c["kind"] == "slurm", "a machine with scheduler clients is detected as a cluster node")
 cs = H.cluster_status()
 gpu = [p for p in cs["partitions"] if p["name"] == "gpu"][0]
-check(len(cs["partitions"]) == 2 and gpu["default"] and gpu["nodes"] == 18, "sinfo rows are aggregated per partition")
-check(gpu["states"] == {"idle": 4, "mixed": 12, "down": 2} and gpu["gres"] == "gpu:a100:4", "node states summed, slurm state suffixes stripped")
-check(gpu["cpus"] == {"alloc": 380, "idle": 644, "other": 128, "total": 1152}, "cpu counts summed across states")
+cpu = [p for p in cs["partitions"] if p["name"] == "cpu"][0]
+check(len(cs["partitions"]) == 2 and gpu["default"] and gpu["nodes"] == 4, "sinfo rows are aggregated per partition")
+check(gpu["states"] == {"idle": 1, "mixed": 2, "down": 1} and gpu["gres"] == "gpu:a100:4", "node states summed, slurm state suffixes stripped")
+check(gpu["cpus"] == {"alloc": 60, "idle": 132, "other": 64, "total": 256}, "cpus: idle excludes the down node, whose cpus are 'other' (%s)" % gpu["cpus"])
+check(gpu["gpus"] == {"alloc": 4, "idle": 8, "total": 16}, "gpus: alloc from GresUsed, available excludes the down node (%s)" % gpu["gpus"])
+MB = 1024 * 1024
+check(gpu["mem"] == {"alloc": 384000 * MB, "avail": 3 * 512000 * MB - 384000 * MB, "total": 4 * 512000 * MB}, "memory: allocated vs available on usable nodes (%s)" % gpu["mem"])
+check(gpu["nodes_avail"] == 3 and cpu["nodes_avail"] == 2 and cpu["gpus"]["total"] == 4, "usable node count; a node in two partitions counts in each")
+s = cs["summary"]
+check(s["nodes"] == {"total": 5, "idle": 2, "avail": 4}, "cluster summary counts every node once (%s)" % s["nodes"])
+check(s["gpus"] == {"alloc": 4, "idle": 8, "total": 16} and s["cpus"]["idle"] == 196 and s["cpus"]["total"] == 320, "cluster-wide gpu/cpu availability de-duplicated (%s %s)" % (s["gpus"], s["cpus"]))
+check(s["mem"]["total"] == (4 * 512000 + 256000) * MB and s["mem"]["avail"] == (3 * 512000 + 256000 - 384000) * MB, "cluster-wide memory (%s)" % s["mem"])
 check(len(cs["jobs"]) == 2 and cs["jobs"][1]["state"] == "PENDING" and cs["jobs"][1]["reason"] == "(Resources)", "squeue rows parsed")
+check(H._node_usable("idle~") and H._node_usable("mixed") and not H._node_usable("drain") and not H._node_usable("idle*") and not H._node_usable("resv"), "node usability by slurm state")
+# scontrol is preferred when present: it knows the cores/memory slurm keeps for the OS (CoreSpecCount / MemSpecLimit),
+# which sinfo still reports as idle. n1: 36 cores, 8 specialized -> 28 allocatable; n2: pre-22.05 output (no CPUEfctv), drained;
+# n3: cloud node in no partition (cluster totals only)
+SCONTROL_ROWS = (
+    "NodeName=n1 Arch=x86_64 CoresPerSocket=18 CPUAlloc=8 CPUEfctv=28 CPUTot=36 CPULoad=2.31 AvailableFeatures=(null) ActiveFeatures=(null) "
+    "Gres=gpu:a100:4(S:0-1) GresDrain=N/A GresUsed=gpu:a100:2(IDX:0-1) NodeAddr=n1 NodeHostName=n1 Version=23.02.7 OS=Linux 5.15.0-91-generic #101-Ubuntu SMP "
+    "RealMemory=512000 AllocMem=128000 FreeMem=401230 Sockets=2 Boards=1 CoreSpecCount=8 CPUSpecList=28-35 MemSpecLimit=16000 State=MIXED ThreadsPerCore=1 "
+    "TmpDisk=0 Weight=1 Owner=N/A MCS_label=N/A Partitions=gpu,cpu BootTime=2026-08-20T08:00:00 SlurmdStartTime=2026-08-20T08:01:00 "
+    "CfgTRES=cpu=28,mem=512000M,billing=28,gres/gpu=4 AllocTRES=cpu=8,mem=128000M,gres/gpu=2 CapWatts=n/a CurrentWatts=0 AveWatts=0\n"
+    "NodeName=n2 Arch=x86_64 CoresPerSocket=16 CPUAlloc=0 CPUTot=64 CPULoad=0.01 AvailableFeatures=(null) ActiveFeatures=(null) Gres=gpu:4 "
+    "NodeAddr=n2 NodeHostName=n2 Version=21.08.8 OS=Linux RealMemory=256000 AllocMem=0 FreeMem=250000 Sockets=2 Boards=1 CoreSpecCount=4 "
+    "State=IDLE+DRAIN ThreadsPerCore=2 TmpDisk=0 Weight=1 Owner=N/A MCS_label=N/A Partitions=gpu Reason=bad dimm [root@2026-08-27T10:00:00] "
+    "CfgTRES=cpu=56,mem=256000M,billing=56,gres/gpu=4 AllocTRES=cpu=0,mem=0M,gres/gpu=1\n"
+    "NodeName=n3 CPUAlloc=0 CPUEfctv=8 CPUTot=8 CPULoad=0.00 Gres=(null) GresUsed=(null) RealMemory=16000 AllocMem=0 State=IDLE+CLOUD+POWERED_DOWN "
+    "ThreadsPerCore=1 CfgTRES=cpu=8,mem=16000M,billing=8 AllocTRES=\n")
+fake("scontrol", "case \"$*\" in *show*node*) cat <<'OUT'\n%sOUT\n;; *) exit 1;; esac\n" % SCONTROL_ROWS)
+cs3 = H.cluster_status()
+gpu3 = [p for p in cs3["partitions"] if p["name"] == "gpu"][0]
+cpu3 = [p for p in cs3["partitions"] if p["name"] == "cpu"][0]
+check(cpu3["cpus"] == {"alloc": 8, "idle": 20, "other": 0, "total": 28}, "scontrol: specialized cores are not allocatable (36 cores, 8 reserved -> 28) (%s)" % cpu3["cpus"])
+check(gpu3["cpus"] == {"alloc": 8, "idle": 20, "other": 56, "total": 84}, "scontrol: CoreSpecCount x ThreadsPerCore derived without CPUEfctv; drained node is 'other' (%s)" % gpu3["cpus"])
+check(gpu3["gpus"] == {"alloc": 3, "idle": 2, "total": 8}, "scontrol: gpu use from GresUsed, else AllocTRES (%s)" % gpu3["gpus"])
+check(gpu3["mem"] == {"alloc": 128000 * MB, "avail": (512000 - 16000 - 128000) * MB, "total": (512000 - 16000 + 256000) * MB}, "scontrol: MemSpecLimit is not allocatable (%s)" % gpu3["mem"])
+check(gpu3["nodes_avail"] == 1 and cpu3["nodes_avail"] == 1, "scontrol: drained node unusable")
+s3 = cs3["summary"]
+check(s3["nodes"] == {"total": 3, "idle": 1, "avail": 2} and s3["cpus"] == {"alloc": 8, "idle": 28, "other": 56, "total": 92}, "scontrol: a node in no partition still counts cluster-wide; powered-down cloud node usable (%s %s)" % (s3["nodes"], s3["cpus"]))
+check(H._count_ids("0,2-3,28-35") == 11 and H._tres_gpu("cpu=8,mem=1M,gres/gpu=2,gres/gpu:a100=2") == 4, "spec list / tres parsing")
+check(H._scontrol_usable("MIXED") and H._scontrol_usable("IDLE+CLOUD+POWERED_DOWN") and not H._scontrol_usable("IDLE+DRAIN") and not H._scontrol_usable("DOWN+NOT_RESPONDING") and not H._scontrol_usable("IDLE+RESERVED"), "scontrol node states")
+fake("scontrol", "exit 1\n")
+# old slurm without GresUsed: the per-node query fails, the coarse queries still give totals
+fake("sinfo", "case \"$*\" in *-N*-O*) echo 'sinfo: error: Invalid field' >&2; exit 1;; *-N*) cat <<'OUT'\ngpu*|idle|gpu:a100:4\ngpu*|down*|gpu:a100:4\nOUT\n;; *) cat <<'OUT'\n%sOUT\n;; esac\n" % PART_ROWS)
+fake("squeue", "cat <<'OUT'\nRUNNING|gpu|gpu:2\nOUT\n")
+cs2 = H.cluster_status()
+gpu2 = [p for p in cs2["partitions"] if p["name"] == "gpu"][0]
+check(gpu2["gpus"] == {"alloc": 2, "idle": 4, "total": 8} and gpu2["mem"] is None and cs2["summary"]["gpus"]["total"] == 8, "fallback without per-node gres usage (%s)" % gpu2["gpus"])
 os.environ["PATH"] = os.environ["PATH"].split(os.pathsep, 1)[1]
 check(H.detect_cluster() is None, "a machine without a scheduler is not a cluster node")
 

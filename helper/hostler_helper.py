@@ -1353,13 +1353,22 @@ def _sched_run(cmd, args, timeout=12):
     return out, ("" if rc == 0 else (err or "").strip() or "%s not found" % cmd)
 
 
-def _slurm_status(limit=400):
-    """One row per partition (sinfo reports partition x node-state), plus this user's jobs."""
-    st = {"kind": "slurm", "partitions": [], "jobs": [], "error": None}
-    out, err = _sched_run("sinfo", ["-h", "-o", "%P|%a|%D|%T|%C|%G"])
-    if err:
-        st["error"] = truncate(err, 200)
+def _gres_count(text):
+    """gpu:a100:4 / gres/gpu:4 / gpu:4(IDX:0-3) -> 4 (0 when there is none)."""
+    if not text or text in ("(null)", "N/A"):
+        return 0
+    total = 0
+    for chunk in str(text).split(","):
+        m = re.search(r"(?:^|/)gpu[^:]*:(?:[^:,()]+:)?(\d+)", chunk.strip())
+        if m:
+            total += int(m.group(1))
+    return total
+
+
+def _slurm_partitions(limit=400):
+    """sinfo prints one row per partition x node-state; fold them into one row per partition."""
     parts = OrderedDict()
+    out, err = _sched_run("sinfo", ["-h", "-o", "%P|%a|%D|%T|%C|%G|%l"])
     for line in out.splitlines()[:limit]:
         f = line.split("|")
         if len(f) < 4:
@@ -1368,8 +1377,9 @@ def _slurm_status(limit=400):
         name = raw.rstrip("*")
         p = parts.get(name)
         if p is None:
-            p = parts[name] = {"name": name, "default": raw.endswith("*"), "avail": f[1].strip(),
-                               "nodes": 0, "states": OrderedDict(), "cpus": None, "gres": None}
+            p = parts[name] = {"name": name, "default": raw.endswith("*"), "avail": f[1].strip(), "nodes": 0,
+                               "states": OrderedDict(), "cpus": None, "gres": None, "limit": None,
+                               "gpus": {"alloc": 0, "idle": 0, "total": 0}}
         nodes = int(f[2]) if f[2].strip().isdigit() else 0
         state = f[3].strip().rstrip("*~#$@")          # idle~ / down* are still idle / down
         p["nodes"] += nodes
@@ -1384,18 +1394,101 @@ def _slurm_status(limit=400):
         g = (f[5].strip() if len(f) > 5 else "")
         if g and g != "(null)" and not p["gres"]:
             p["gres"] = g
-    st["partitions"] = list(parts.values())
-    out, err = _sched_run("squeue", ["-h", "-u", os.environ.get("USER") or _login_name(), "-o", "%i|%P|%j|%T|%M|%l|%D|%R"])
-    if err and not st["error"]:
-        st["error"] = truncate(err, 200)
+        if len(f) > 6 and f[6].strip() and not p["limit"]:
+            p["limit"] = f[6].strip()
+    return parts, err
+
+
+def _slurm_gpus(parts, limit=4000):
+    """GPUs per partition: totals from the node list, allocation from the running jobs."""
+    out, _ = _sched_run("sinfo", ["-h", "-N", "-o", "%P|%T|%G"])
+    for line in out.splitlines()[:limit]:
+        f = line.split("|")
+        if len(f) < 3:
+            continue
+        p = parts.get(f[0].strip().rstrip("*"))
+        if not p:
+            continue
+        n = _gres_count(f[2])
+        p["gpus"]["total"] += n
+        if f[1].strip().rstrip("*~#$@") == "idle":
+            p["gpus"]["idle"] += n
+
+
+def _slurm_queue(parts, limit=20000):
+    """Cluster-wide queue depth, and GPUs the running jobs hold, in one squeue call."""
+    summary = {"running": 0, "pending": 0, "other": 0}
+    out, _ = _sched_run("squeue", ["-h", "-a", "-o", "%T|%P|%b"], timeout=20)
+    for line in out.splitlines()[:limit]:
+        f = line.split("|")
+        state = f[0].strip().upper()
+        if state.startswith("R"):
+            summary["running"] += 1
+            if len(f) > 2:
+                p = parts.get(f[1].strip().rstrip("*"))
+                if p:
+                    p["gpus"]["alloc"] += _gres_count(f[2])
+        elif state.startswith("P"):
+            summary["pending"] += 1
+        else:
+            summary["other"] += 1
+    return summary
+
+
+def _slurm_jobs(limit=400):
+    out, err = _sched_run("squeue", ["-h", "-u", os.environ.get("USER") or _login_name(),
+                                     "-o", "%i|%P|%j|%T|%M|%l|%D|%R|%C|%b|%N|%V"])
+    jobs = []
     for line in out.splitlines()[:limit]:
         f = line.split("|")
         if len(f) < 8:
             continue
-        st["jobs"].append({"id": f[0].strip(), "partition": f[1].strip(), "name": truncate(f[2].strip(), 60),
-                           "state": f[3].strip(), "time": f[4].strip(), "limit": f[5].strip(),
-                           "nodes": int(f[6]) if f[6].strip().isdigit() else 0, "reason": truncate(f[7].strip(), 80)})
-    return st
+        jobs.append({"id": f[0].strip(), "partition": f[1].strip(), "name": truncate(f[2].strip(), 60),
+                     "state": f[3].strip(), "time": f[4].strip(), "limit": f[5].strip(),
+                     "nodes": int(f[6]) if f[6].strip().isdigit() else 0, "reason": truncate(f[7].strip(), 80),
+                     "cpus": int(f[8]) if len(f) > 8 and f[8].strip().isdigit() else 0,
+                     "gpus": _gres_count(f[9]) if len(f) > 9 else 0,
+                     "nodelist": truncate(f[10].strip(), 80) if len(f) > 10 else "",
+                     "submitted": f[11].strip() if len(f) > 11 else ""})
+    return jobs, err
+
+
+def _slurm_recent(limit=25):
+    """Today's finished jobs — the usual "did it fail?" question."""
+    if not which("sacct"):
+        return []
+    out, err = _sched_run("sacct", ["-X", "-n", "-P", "-u", os.environ.get("USER") or _login_name(),
+                                    "-S", "today", "-o", "JobID,JobName,Partition,State,Elapsed,ExitCode,End"], timeout=20)
+    rows = []
+    for line in out.splitlines():
+        f = line.split("|")
+        if len(f) < 7 or f[3].strip().upper() in ("RUNNING", "PENDING"):
+            continue
+        rows.append({"id": f[0].strip(), "name": truncate(f[1].strip(), 60), "partition": f[2].strip(),
+                     "state": f[3].strip(), "elapsed": f[4].strip(), "exit": f[5].strip(), "end": f[6].strip()})
+    rows.reverse()
+    return rows[:limit]
+
+
+def _slurm_status():
+    parts, err = _slurm_partitions()
+    try:
+        _slurm_gpus(parts)
+    except Exception:
+        log("sinfo node scan failed: %s", traceback.format_exc())
+    try:
+        queue = _slurm_queue(parts)
+    except Exception:
+        queue = {"running": 0, "pending": 0, "other": 0}
+    jobs, jerr = _slurm_jobs()
+    partitions = list(parts.values())
+    nodes = {"total": sum(p["nodes"] for p in partitions), "idle": sum(p["states"].get("idle", 0) for p in partitions)}
+    gpus = {"total": sum(p["gpus"]["total"] for p in partitions), "alloc": sum(p["gpus"]["alloc"] for p in partitions)}
+    return {"kind": "slurm", "partitions": partitions, "jobs": jobs, "recent": _slurm_recent(),
+            "summary": {"nodes": nodes, "gpus": gpus, "queue": queue,
+                        "mine": {"running": len([j for j in jobs if j["state"].upper().startswith("R")]),
+                                 "pending": len([j for j in jobs if j["state"].upper().startswith("P")])}},
+            "error": truncate(err or jerr, 200) or None}
 
 
 def _login_name():
@@ -1404,6 +1497,32 @@ def _login_name():
         return pwd.getpwuid(os.getuid()).pw_name
     except Exception:
         return ""
+
+
+def cluster_job(job_id):
+    """`scontrol show job` as a dict — StdOut/WorkDir/NodeList are what the UI acts on."""
+    if not re.match(r"^[0-9_.+\[\]-]+$", str(job_id or "")):
+        raise ValueError("bad job id")
+    out, err = _sched_run("scontrol", ["show", "job", str(job_id)], timeout=15)
+    if err and not out.strip():
+        raise ValueError(err)
+    d = {}
+    for token in out.split():
+        k, sep, v = token.partition("=")
+        if sep and k and k not in d:
+            d[k] = v
+    return {"id": str(job_id), "fields": d,
+            "stdout": d.get("StdOut"), "stderr": d.get("StdErr"), "workdir": d.get("WorkDir"),
+            "nodelist": d.get("NodeList"), "state": d.get("JobState"), "raw": truncate(out.strip(), 8000)}
+
+
+def cluster_cancel(job_id):
+    if not re.match(r"^[0-9_.+\[\]-]+$", str(job_id or "")):
+        raise ValueError("bad job id")
+    out, err = _sched_run("scancel", [str(job_id)], timeout=15)
+    if err:
+        raise ValueError(err)
+    return {"cancelled": str(job_id), "output": (out or "").strip()}
 
 
 def cluster_status():
@@ -2718,6 +2837,10 @@ class Server(object):
             return self.monitor.res.sample_system()
         if op == "cluster.status":
             return cluster_status()
+        if op == "cluster.job":
+            return cluster_job(req.get("job"))
+        if op == "cluster.cancel":
+            return cluster_cancel(req.get("job"))
         if op == "tools.rescan":
             return self.monitor.rescan_tools()
         if op == "history.list":

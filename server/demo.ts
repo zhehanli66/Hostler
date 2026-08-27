@@ -105,15 +105,25 @@ export function demoCluster() {
   return {
     kind: 'slurm',
     partitions: [
-      { name: 'gpu', default: true, avail: 'up', nodes: 18, states: { idle: 4, mixed: 12, down: 2 }, cpus: { alloc: 380, idle: 644, other: 128, total: 1152 }, gres: 'gpu:a100:4' },
-      { name: 'cpu', default: false, avail: 'up', nodes: 48, states: { allocated: 40, idle: 8 }, cpus: { alloc: 2560, idle: 512, other: 0, total: 3072 }, gres: null },
-      { name: 'debug', default: false, avail: 'up', nodes: 2, states: { idle: 2 }, cpus: { alloc: 0, idle: 128, other: 0, total: 128 }, gres: null },
+      { name: 'gpu', default: true, avail: 'up', nodes: 18, states: { idle: 4, mixed: 12, down: 2 }, cpus: { alloc: 380, idle: 644, other: 128, total: 1152 }, gpus: { alloc: 46, idle: 16, total: 72 }, gres: 'gpu:a100:4', limit: '2-00:00:00' },
+      { name: 'cpu', default: false, avail: 'up', nodes: 48, states: { allocated: 40, idle: 8 }, cpus: { alloc: 2560, idle: 512, other: 0, total: 3072 }, gpus: { alloc: 0, idle: 0, total: 0 }, gres: null, limit: '7-00:00:00' },
+      { name: 'debug', default: false, avail: 'up', nodes: 2, states: { idle: 2 }, cpus: { alloc: 0, idle: 128, other: 0, total: 128 }, gpus: { alloc: 0, idle: 8, total: 8 }, gres: 'gpu:a100:4', limit: '30:00' },
     ],
     jobs: [
-      { id: '1842317', partition: 'gpu', name: 'train-resnet-seed3', state: 'RUNNING', time: '4:21:07', limit: '1-00:00:00', nodes: 1, reason: 'node[07]' },
-      { id: '1842401', partition: 'gpu', name: 'sweep-lr', state: 'PENDING', time: '0:00', limit: '8:00:00', nodes: 2, reason: '(Resources)' },
-      { id: '1842402', partition: 'cpu', name: 'preprocess-shards', state: 'RUNNING', time: '18:44', limit: '2:00:00', nodes: 1, reason: 'node[41]' },
+      { id: '1842317', partition: 'gpu', name: 'train-resnet-seed3', state: 'RUNNING', time: '4:21:07', limit: '1-00:00:00', nodes: 1, reason: 'node[07]', cpus: 32, gpus: 4, nodelist: 'node07', submitted: '2026-08-27T18:02:11' },
+      { id: '1842401', partition: 'gpu', name: 'sweep-lr', state: 'PENDING', time: '0:00', limit: '8:00:00', nodes: 2, reason: '(Resources)', cpus: 64, gpus: 8, nodelist: '', submitted: '2026-08-27T22:40:03' },
+      { id: '1842402', partition: 'cpu', name: 'preprocess-shards', state: 'RUNNING', time: '18:44', limit: '2:00:00', nodes: 1, reason: 'node[41]', cpus: 16, gpus: 0, nodelist: 'node41', submitted: '2026-08-27T22:21:40' },
     ],
+    recent: [
+      { id: '1842301', name: 'smoke-test', partition: 'gpu', state: 'FAILED', elapsed: '00:00:31', exit: '1:0', end: '2026-08-27T21:03:44' },
+      { id: '1842290', name: 'preprocess-shards', partition: 'cpu', state: 'COMPLETED', elapsed: '00:18:44', exit: '0:0', end: '2026-08-27T20:11:02' },
+    ],
+    summary: {
+      nodes: { total: 68, idle: 14 },
+      gpus: { total: 80, alloc: 46 },
+      queue: { running: 214, pending: 87, other: 3 },
+      mine: { running: 2, pending: 1 },
+    },
     error: null,
   };
 }

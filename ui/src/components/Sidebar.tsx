@@ -41,7 +41,7 @@ function MachineNode({ m, sel, workspaces }: { m: MachineState; sel: Selection; 
   const [open, setOpen] = useState(true);
   const r = m.resources;
   const gpu = r?.gpus?.[0];
-  const isSel = sel?.machineId === m.config.id && !sel.sessionId && !sel.workspace;
+  const isSel = sel?.machineId === m.config.id && !sel.sessionId && !sel.workspace && !sel.view;
   const groups = new Map<string, SessionInfo[]>();
   for (const p of workspaces) groups.set(p, []);
   for (const s of m.sessions) { const k = s.workspace || s.cwd; if (!groups.has(k)) groups.set(k, []); groups.get(k)!.push(s); }
@@ -66,6 +66,14 @@ function MachineNode({ m, sel, workspaces }: { m: MachineState; sel: Selection; 
       {open && (
         <div className="tree-children">
           {m.status !== 'connected' && m.status !== 'disconnected' && <div className="tree-empty">{m.status}{m.error ? ` — ${m.error}` : ''}</div>}
+          {m.hello?.cluster?.kind && (
+            <div className={classNames('tree-row tree-ws', sel?.machineId === m.config.id && sel.view === 'cluster' && 'selected')}
+              title={`${m.hello.cluster.kind} scheduler on this machine`} onClick={() => select({ machineId: m.config.id, view: 'cluster' })}>
+              <span className="caret"><Icon name="layers" size={12} /></span>
+              <span className="name">{'\u200E' + 'cluster queue' + '\u200E'}</span>
+              <span className="meta">{m.hello.cluster.kind}</span>
+            </div>
+          )}
           {[...groups.entries()].map(([path, sessions]) => <WorkspaceNode key={path} m={m} path={path} sessions={sessions} sel={sel} home={home} />)}
           {m.status === 'connected' && groups.size === 0 && <div className="tree-empty">no agents yet</div>}
           {m.discovered.filter((d) => !d.background).length > 0 && (

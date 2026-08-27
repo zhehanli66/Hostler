@@ -1,9 +1,10 @@
 import React, { useContext, useEffect, useState } from 'react';
-import type { AgentType, ClusterStatus, DiscoveredProcess, MachineState, WorkspaceConfig } from '@shared/types';
+import type { AgentType, DiscoveredProcess, MachineState, WorkspaceConfig } from '@shared/types';
 import { AppCtx } from '../App';
 import { SessionTable } from './SessionTable';
 import { Icon, Sparkline, TypeAvatar } from './icons';
 import { api, useAppState } from '../api';
+import { PartitionTile, useCluster } from './ClusterView';
 import { ago, classNames, fmtBytes, fmtDuration, pct, sessionTone, shortPath, tailPath, TYPE_LABEL } from '../util';
 
 export function MachineView({ machine: m, workspaces }: { machine: MachineState; workspaces: WorkspaceConfig[] }) {
@@ -197,75 +198,33 @@ function WorkspaceGroup({ m, path, name, pinned, sessions, home, connected }: { 
   );
 }
 
-/** Queues and your jobs, for a machine that turned out to be a cluster login node. */
+/** Cluster summary for a login node; the full queue lives in the Cluster view. */
 function ClusterCard({ m }: { m: MachineState }) {
+  const { select } = useContext(AppCtx);
   const kind = m.hello?.cluster?.kind;
   const connected = m.status === 'connected';
-  const [st, setSt] = useState<ClusterStatus | null>(null);
-  const [err, setErr] = useState('');
-  const [busy, setBusy] = useState(false);
-  const load = () => {
-    setBusy(true);
-    api.rpc<ClusterStatus>(m.config.id, 'cluster.status')
-      .then((r) => { setSt(r); setErr(''); })
-      .catch((e: Error) => setErr(e.message))
-      .then(() => setBusy(false));
-  };
-  useEffect(() => {
-    if (!connected || !kind) return;
-    load();
-    const t = setInterval(load, 20000);      // sinfo/squeue are cheap; the queue moves
-    return () => clearInterval(t);
-  }, [connected, kind, m.config.id]);
+  const { status, error, busy, reload } = useCluster(m.config.id, connected && !!kind, 30000);
   if (!kind) return null;
-  const jobs = st?.jobs || [];
-  const running = jobs.filter((j) => /^R/i.test(j.state)).length;
+  const s = status?.summary;
   return (
     <div className="card" style={{ marginBottom: 14 }}>
       <h3><Icon name="layers" size={13} /> Cluster
-        <span className="sub">{kind}{st ? ` · ${st.partitions.length} partition(s) · ${jobs.length} job(s) of yours${jobs.length ? ` (${running} running)` : ''}` : ' · reading queues…'}</span>
+        <span className="sub">{kind}{status ? ` · ${status.partitions.length} partition(s)` : ' · reading queues…'}</span>
         <span className="spacer" />
-        <button className="btn sm ghost icon" title="Refresh" disabled={!connected || busy} onClick={load}><Icon name="refresh" size={13} /></button>
+        <button className="btn sm ghost icon" title="Refresh" disabled={!connected || busy} onClick={reload}><Icon name="refresh" size={13} /></button>
+        <button className="btn sm" onClick={() => select({ machineId: m.config.id, view: 'cluster' })}>Queue & jobs <Icon name="chevronRight" size={12} /></button>
       </h3>
-      {err || st?.error ? <div className="banner warn" style={{ marginBottom: 10 }}><Icon name="alert" size={15} /><div>{err || st?.error}</div></div> : null}
-      {st?.unsupported ? <div className="empty small">{kind} is detected on this machine, but Hostler only reads Slurm queues so far.</div> : null}
-      {st && st.partitions.length > 0 && (
-        <div className="gauges">
-          {st.partitions.map((p) => {
-            const idle = p.states.idle || 0;
-            const used = p.cpus && p.cpus.total ? pct(p.cpus.alloc, p.cpus.total) : 0;
-            const detail = Object.keys(p.states).map((k) => `${p.states[k]} ${k}`).join(' · ');
-            return (
-              <div className="gauge" key={p.name}>
-                <div className="label">
-                  <span title={p.default ? 'default partition' : ''}><Icon name="server" size={12} /> {p.name}{p.default ? '*' : ''}</span>
-                  <span>{p.avail === 'up' ? `${used.toFixed(0)}% cpu` : p.avail}</span>
-                </div>
-                <div className="value">{idle}<small>of {p.nodes} nodes idle</small></div>
-                <div className={classNames('bar', used > 90 ? 'crit' : used > 75 ? 'warn' : '')}><i style={{ width: `${Math.min(100, used)}%` }} /></div>
-                <div className="sub" title={`${detail}${p.gres ? ` · ${p.gres}` : ''}`}>{detail}{p.gres ? ` · ${p.gres}` : ''}</div>
-              </div>
-            );
-          })}
+      {error || status?.error ? <div className="banner warn" style={{ marginBottom: 10 }}><Icon name="alert" size={15} /><div>{error || status?.error}</div></div> : null}
+      {status?.unsupported ? <div className="empty small">{kind} is installed here, but Hostler only reads Slurm queues so far.</div> : null}
+      {s && (
+        <div className="stats" style={{ marginBottom: status && status.partitions.length ? 10 : 0 }}>
+          <span className="stat"><Icon name="server" size={12} /><b>{s.nodes.idle}</b> of {s.nodes.total} nodes idle</span>
+          {s.gpus.total > 0 && <span className="stat"><Icon name="gpu" size={12} /><b>{s.gpus.total - s.gpus.alloc}</b> of {s.gpus.total} GPUs free</span>}
+          <span className="stat"><Icon name="activity" size={12} /><b>{s.queue.running}</b> running · {s.queue.pending} queued</span>
+          <span className="stat"><Icon name="bot" size={12} /><b>{s.mine.running + s.mine.pending}</b> job(s) of yours</span>
         </div>
       )}
-      {jobs.length > 0 ? (
-        <div className="tbl-wrap" style={{ marginTop: 12 }}><table className="tbl">
-          <thead><tr><th>Job</th><th>Partition</th><th>State</th><th className="num">Nodes</th><th>Time</th><th>Where / why</th></tr></thead>
-          <tbody>
-            {jobs.map((j) => (
-              <tr key={j.id}>
-                <td><span className="name-cell"><span style={{ minWidth: 0 }}><span className="t">{j.name}</span><span className="s mono">{j.id}</span></span></span></td>
-                <td className="nowrap">{j.partition}</td>
-                <td className="nowrap"><span className={classNames('badge', /^R/i.test(j.state) ? 'idle' : /^(PD|PENDING)/i.test(j.state) ? 'busy' : 'muted')}>{j.state.toLowerCase()}</span></td>
-                <td className="num">{j.nodes}</td>
-                <td className="nowrap mono">{j.time}{j.limit ? ` / ${j.limit}` : ''}</td>
-                <td className="mono trunc" style={{ maxWidth: 260 }} title={j.reason}>{j.reason}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table></div>
-      ) : st && !st.unsupported ? <div className="empty small" style={{ marginTop: 10 }}>No jobs of yours in the queue.</div> : null}
+      {status && status.partitions.length > 0 && <div className="gauges">{status.partitions.map((p) => <PartitionTile key={p.name} p={p} />)}</div>}
     </div>
   );
 }

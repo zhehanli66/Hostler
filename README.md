@@ -43,9 +43,11 @@ Machine  →  Workspace (a directory)  →  Agent (persistent PTY)  →  Subagen
   `opencode --session`), including conversations that were never started from Hostler.
 - **Native terminal** (xterm.js) plus one-line input, `^C`, `Esc`; **Stop / Kill / Restart** (Claude Code restarts with
   `--resume`); **Git status & diff** per workspace; **CPU / RAM / GPU / VRAM** per machine (NVIDIA via `nvidia-smi`, Jetson via sysfs).
-- **Cluster login nodes.** A machine with a scheduler client on it gets a queue view: partitions
-  with idle/allocated nodes and GPU gres, plus your own jobs (Slurm today; the detection also
-  recognises PBS / LSF / SGE).
+- **Cluster login nodes.** A machine with a scheduler client on it gets a **Cluster** view:
+  partitions with idle nodes, CPU and GPU allocation, cluster-wide queue depth, your jobs with
+  their time budget — and per job: open a shell *inside* the allocation (`srun --overlap --pty`),
+  follow its output, or cancel it. Finished-today comes from `sacct`. (Slurm; PBS/LSF/SGE are
+  detected and say so.)
 - **Light and dark** themes, desktop app (Electron) or headless control plane + any browser.
 
 <p align="center">

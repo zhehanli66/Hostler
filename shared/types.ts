@@ -67,15 +67,48 @@ export interface ClusterPartition {
   /** node count per scheduler state: idle / mixed / allocated / down … */
   states: Record<string, number>;
   cpus?: { alloc: number; idle: number; other: number; total: number } | null;
+  /** total from the node list, alloc from the running jobs */
+  gpus?: { alloc: number; idle: number; total: number };
   gres?: string | null;
+  /** the partition's max wall time */
+  limit?: string | null;
 }
 
-export interface ClusterJob { id: string; partition: string; name: string; state: string; time: string; limit: string; nodes: number; reason: string }
+export interface ClusterJob {
+  id: string; partition: string; name: string; state: string;
+  /** elapsed and the job's wall-time limit */
+  time: string; limit: string;
+  nodes: number;
+  /** node list for a running job, the pending reason otherwise */
+  reason: string;
+  cpus?: number; gpus?: number; nodelist?: string; submitted?: string;
+}
+
+export interface ClusterRecentJob { id: string; name: string; partition: string; state: string; elapsed: string; exit: string; end: string }
+
+export interface ClusterSummary {
+  nodes: { total: number; idle: number };
+  gpus: { total: number; alloc: number };
+  /** the whole cluster's queue, all users */
+  queue: { running: number; pending: number; other: number };
+  mine: { running: number; pending: number };
+}
+
+/** `scontrol show job` for one job */
+export interface ClusterJobDetail {
+  id: string;
+  fields: Record<string, string>;
+  stdout?: string | null; stderr?: string | null; workdir?: string | null; nodelist?: string | null; state?: string | null;
+  raw?: string;
+}
 
 export interface ClusterStatus {
   kind: string | null;
   partitions: ClusterPartition[];
   jobs: ClusterJob[];
+  /** today's finished jobs (sacct), newest first */
+  recent?: ClusterRecentJob[];
+  summary?: ClusterSummary;
   error?: string | null;
   /** a scheduler Hostler does not parse yet */
   unsupported?: boolean;

@@ -4,10 +4,11 @@ import { Sidebar } from './components/Sidebar';
 import { MachineView } from './components/MachineView';
 import { AgentView } from './components/AgentView';
 import { WorkspaceView } from './components/WorkspaceView';
+import { ClusterView } from './components/ClusterView';
 import { AddMachineModal, NewAgentModal, ConfirmModal, EditMachineModal, InstallToolModal } from './components/modals';
 import { Icon } from './components/icons';
 
-export type Selection = { machineId: string; workspace?: string; sessionId?: string } | null;
+export type Selection = { machineId: string; workspace?: string; sessionId?: string; view?: 'cluster' } | null;
 export type Modal =
   | { type: 'addMachine' }
   | { type: 'editMachine'; machineId: string }
@@ -22,15 +23,15 @@ export function App() {
   const state = useAppState();
   useApiMeta();
   const [sel, setSel] = useState<Selection>(() => {
-    const h = location.hash.match(/^#\/m\/([^/]+)(?:\/w\/([^/]+))?(?:\/s\/([^/]+))?/);
-    if (h) return { machineId: decodeURIComponent(h[1]), workspace: h[2] ? decodeURIComponent(h[2]) : undefined, sessionId: h[3] ? decodeURIComponent(h[3]) : undefined };
+    const h = location.hash.match(/^#\/m\/([^/]+)(?:\/w\/([^/]+))?(?:\/s\/([^/]+))?(\/cluster)?/);
+    if (h) return { machineId: decodeURIComponent(h[1]), workspace: h[2] ? decodeURIComponent(h[2]) : undefined, sessionId: h[3] ? decodeURIComponent(h[3]) : undefined, view: h[4] ? 'cluster' : undefined };
     try { return JSON.parse(localStorage.getItem('hostler_sel') || 'null'); } catch { return null; }
   });
   const [modal, setModal] = useState<Modal>(null);
 
   useEffect(() => {
     try { localStorage.setItem('hostler_sel', JSON.stringify(sel)); } catch { /* ignore */ }
-    const hash = sel ? `#/m/${encodeURIComponent(sel.machineId)}${sel.workspace ? `/w/${encodeURIComponent(sel.workspace)}` : ''}${sel.sessionId ? `/s/${encodeURIComponent(sel.sessionId)}` : ''}` : '';
+    const hash = sel ? `#/m/${encodeURIComponent(sel.machineId)}${sel.workspace ? `/w/${encodeURIComponent(sel.workspace)}` : ''}${sel.sessionId ? `/s/${encodeURIComponent(sel.sessionId)}` : ''}${sel.view === 'cluster' ? '/cluster' : ''}` : '';
     if (location.hash !== hash) history.replaceState(null, '', location.pathname + location.search + hash);
   }, [sel]);
 
@@ -59,6 +60,8 @@ export function App() {
         <div className="main">
           {!state.version ? (
             <div className="welcome"><div><div className="hero-logo" style={{ animation: 'pulse 1.4s infinite' }}><Icon name="server" size={26} strokeWidth={2.2} /></div><div className="muted">Connecting to the control plane…</div></div></div>
+          ) : machine && sel?.view === 'cluster' ? (
+            <ClusterView machine={machine} />
           ) : machine && session ? (
             <AgentView machine={machine} session={session} />
           ) : machine && sel?.workspace ? (

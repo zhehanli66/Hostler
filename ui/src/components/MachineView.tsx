@@ -199,6 +199,7 @@ function Gauge({ icon, label, value, sub, p, cls, spark, sparkColor }: { icon: '
       <div className="value">{value}</div>
       <div className={classNames('bar', cls, p > 90 ? 'crit' : p > 75 ? 'warn' : '')}><i style={{ width: `${Math.min(100, p)}%` }} /></div>
       {sub && <div className="sub" title={sub}>{sub}</div>}
+      {spark && spark.length > 1 && <div className="spark-wrap"><Sparkline values={spark} height={26} color={sparkColor || 'var(--accent)'} /></div>}
     </div>
   );
 }

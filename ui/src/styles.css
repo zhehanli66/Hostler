@@ -137,13 +137,15 @@ svg { flex: none; }
 .banner.warn { background: var(--busy-bg); border: 1px solid var(--busy); border-color: color-mix(in srgb, var(--busy) 35%, transparent); color: var(--busy); }
 
 .gauges { display: grid; grid-template-columns: repeat(auto-fill, minmax(168px, 1fr)); gap: 10px; }
-.gauge { background: var(--elev); border-radius: 10px; padding: 10px 12px 8px; position: relative; overflow: hidden; border: 1px solid var(--border); }
+.gauge { background: var(--elev); border-radius: 10px; padding: 10px 12px 8px; position: relative; overflow: hidden; border: 1px solid var(--border); display: flex; flex-direction: column; }
 .gauge .label { font-size: 10.5px; color: var(--fg-3); text-transform: uppercase; letter-spacing: .08em; display: flex; justify-content: space-between; align-items: center; gap: 6px; }
 .gauge .label span:first-child { display: inline-flex; gap: 5px; align-items: center; }
 .gauge .value { font-size: 21px; font-weight: 650; margin: 3px 0 6px; letter-spacing: -.02em; font-variant-numeric: tabular-nums; }
 .gauge .value small { font-size: 11px; color: var(--fg-3); font-weight: 400; margin-left: 5px; letter-spacing: 0; }
 .gauge .sub { color: var(--fg-3); font-size: 11px; margin-top: 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.gauge .spark { position: absolute; right: 10px; top: 26px; opacity: .9; pointer-events: none; }
+/* the trend line is its own row at the bottom of the card — never behind the value */
+.gauge .spark-wrap { margin-top: auto; padding-top: 9px; }
+.gauge .spark { display: block; width: 100%; height: 26px; opacity: .9; pointer-events: none; }
 .bar { height: 5px; background: var(--elev-2); border-radius: 3px; overflow: hidden; }
 .bar > i { display: block; height: 100%; background: linear-gradient(90deg, var(--accent-2), var(--accent)); border-radius: 3px; transition: width .5s; }
 .bar.warn > i { background: var(--busy); } .bar.crit > i { background: var(--error); }

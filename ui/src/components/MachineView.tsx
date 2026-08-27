@@ -143,7 +143,9 @@ function KeyLoginBanner({ m }: { m: MachineState }) {
     const r = await api.act('set up key login', () => api.call('machine.installKey', { machineId: m.config.id }));
     setBusy(false);
     if (r) {
-      setDone(r.verified ? `Key login works (${r.identityFile}). The password has been forgotten.` : `Key ${r.added ? 'installed' : 'was already present'}, but key authentication did not succeed — check the server's sshd settings (PubkeyAuthentication, AuthorizedKeysFile).`);
+      setDone(r.verified
+        ? `Key login works (${r.identityFile}). The password has been forgotten.`
+        : `Key ${r.added ? 'installed' : 'was already present'}, but key authentication did not succeed — ${r.reason || "check the server's sshd settings (PubkeyAuthentication, AuthorizedKeysFile)"}.`);
       api.toast(r.verified ? 'info' : 'warn', r.verified ? 'Key login set up; password no longer needed' : 'Key installed but not accepted by the server');
     }
   };

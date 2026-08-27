@@ -176,6 +176,43 @@ export class SshTransport implements Transport {
     return r.stdout.trim();
   }
 
+  /**
+   * Why the server might refuse a key we just installed, checked over the session that *is*
+   * working. sshd is silent about this on purpose, so look at what it looks at.
+   */
+  async keyAuthDiagnosis(): Promise<string> {
+    const script = `stat -c '%n %a' "$HOME" "$HOME/.ssh" "$HOME/.ssh/authorized_keys" 2>/dev/null; ` +
+      `df -PT "$HOME" 2>/dev/null | tail -1 | awk '{print "FSTYPE " $2}'; ` +
+      `grep -Eih '^[[:space:]]*(pubkeyauthentication|authorizedkeysfile|strictmodes)' /etc/ssh/sshd_config 2>/dev/null | sed 's/^/SSHD /'`;
+    let out = '';
+    try { out = (await this.exec(script, 15000)).stdout; } catch { return ''; }
+    const modes = new Map<string, number>();
+    let fstype = '';
+    const sshd: string[] = [];
+    for (const raw of out.split('\n').map((l) => l.trim()).filter(Boolean)) {
+      if (raw.startsWith('FSTYPE ')) fstype = raw.slice(7).trim();
+      else if (raw.startsWith('SSHD ')) sshd.push(raw.slice(5).trim());
+      else {
+        const m = raw.match(/^(\S+)\s+(\d{3,4})$/);
+        if (m) modes.set(m[1], parseInt(m[2], 8));
+      }
+    }
+    const find = (suffix: string) => [...modes.entries()].find(([k]) => k.endsWith(suffix));
+    const ak = find('/.ssh/authorized_keys');
+    const dotssh = find('/.ssh');
+    const home = [...modes.entries()].find(([k]) => k !== ak?.[0] && k !== dotssh?.[0]);
+    const hints: string[] = [];
+    if (home && (home[1] & 0o022)) hints.push(`$HOME is group/other-writable (mode ${home[1].toString(8)}), which makes sshd's StrictModes refuse keys — chmod g-w,o-w ${home[0]}`);
+    if (dotssh && (dotssh[1] & 0o077)) hints.push(`~/.ssh is mode ${dotssh[1].toString(8)} — chmod 700`);
+    if (ak && (ak[1] & 0o077)) hints.push(`~/.ssh/authorized_keys is mode ${ak[1].toString(8)} — chmod 600`);
+    if (/^(nfs|cifs|smb)/i.test(fstype)) hints.push(`the home is on ${fstype}: if the export is root-squashed, sshd cannot read authorized_keys at all and the server needs AuthorizedKeysFile (or AuthorizedKeysCommand) outside the home`);
+    for (const l of sshd) {
+      if (/pubkeyauthentication\s+no/i.test(l)) hints.push('sshd_config has PubkeyAuthentication no');
+      else if (/authorizedkeysfile/i.test(l) && !/\.ssh\/authorized_keys/i.test(l)) hints.push(`sshd_config sets ${l}, so ~/.ssh/authorized_keys is not what it reads`);
+    }
+    return hints.join('; ');
+  }
+
   /** Open a throw-away connection authenticating with this key only; resolves true if the server accepts it. */
   async testKeyAuth(privateKey: string, log: (m: string) => void): Promise<boolean> {
     const r = this.resolved();

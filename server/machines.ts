@@ -206,6 +206,8 @@ export class MachineConn extends EventEmitter {
     const res = await t.installPublicKey(key.publicKeyLine);
     this.note(`public key ${res.toLowerCase()} on remote authorized_keys`);
     const verified = await t.testKeyAuth(key.privateKey, (m) => this.note(m));
+    const reason = verified ? '' : await t.keyAuthDiagnosis().catch(() => '');
+    if (reason) this.note(`key auth refused: ${reason}`);
     if (verified) {
       this.password = undefined;
       delete this.config.password;
@@ -218,7 +220,7 @@ export class MachineConn extends EventEmitter {
       this.note('key login verified; password forgotten');
     }
     this.setStatus(this.state.status);
-    return { publicKey: key.publicKeyLine, identityFile: key.privateKey, added: res === 'ADDED', verified };
+    return { publicKey: key.publicKeyLine, identityFile: key.privateKey, added: res === 'ADDED', verified, reason };
   }
 }
 

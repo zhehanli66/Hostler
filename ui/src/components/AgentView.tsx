@@ -7,7 +7,7 @@ import { TerminalView } from './Terminal';
 import { ProcessTree } from './ProcessTree';
 import { GitPanel } from './GitPanel';
 import { LogsView } from './Logs';
-import { ago, classNames, fmtBytes, runningSubagents, sessionTone, shortPath, TYPE_LABEL } from '../util';
+import { ago, classNames, fmtBytes, runningSubagents, sessionTone, shortPath, shq, TYPE_LABEL } from '../util';
 import { Icon, TypeAvatar } from './icons';
 
 type Tab = 'terminal' | 'activity' | 'processes' | 'logs' | 'git';
@@ -31,7 +31,7 @@ export function AgentView({ machine: m, session: s }: { machine: MachineState; s
   const restart = () => api.act('restart', () => api.rpc(mid, 'session.restart', { session: s.id }));
   const remove = () => api.act('remove', async () => { await api.rpc(mid, 'session.remove', { session: s.id, force: true }); select({ machineId: mid, workspace: s.workspace || s.cwd }); });
   const openTmux = () => api.act('open tmux', async () => {
-    const r = await api.rpc(mid, 'session.create', { spec: { type: 'custom', name: `tmux: ${s.name}`, cwd: s.cwd, workspace: s.workspace, command: `tmux attach -t ${JSON.stringify(s.tmux_target)}` } });
+    const r = await api.rpc(mid, 'session.create', { spec: { type: 'custom', name: `tmux: ${s.name}`, cwd: s.cwd, workspace: s.workspace, command: `tmux attach -t ${shq(s.tmux_target || '')}` } });
     select({ machineId: mid, sessionId: r.id });
   });
 

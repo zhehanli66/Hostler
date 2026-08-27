@@ -3,11 +3,21 @@ import path from 'node:path';
 import os from 'node:os';
 import type { SshHostEntry } from '../shared/types';
 
+/** Expand an Include pattern: absolute or relative to ~/.ssh, with * and ? in the last path segment. */
+function expandInclude(pat: string): string[] {
+  const p = pat.startsWith('/') ? pat : path.join(os.homedir(), '.ssh', pat.replace(/^~\//, os.homedir() + '/'));
+  if (!/[*?]/.test(p)) return fs.existsSync(p) ? [p] : [];
+  const dir = path.dirname(p);
+  const rx = new RegExp('^' + path.basename(p).replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*').replace(/\?/g, '.') + '$');
+  try { return fs.readdirSync(dir).filter((n) => rx.test(n)).sort().map((n) => path.join(dir, n)); } catch { return []; }
+}
+
 /** Minimal ~/.ssh/config parser (Host / HostName / User / Port / IdentityFile / ProxyJump, Include). */
 export function parseSshConfig(file = path.join(os.homedir(), '.ssh', 'config'), depth = 0): SshHostEntry[] {
   let text: string;
   try { text = fs.readFileSync(file, 'utf8'); } catch { return []; }
   const entries: SshHostEntry[] = [];
+  const defaults: SshHostEntry = { host: '*' };   // values from a plain `Host *` block apply to every host that lacks them
   let current: SshHostEntry[] = [];
   for (const rawLine of text.split(/\r?\n/)) {
     const line = rawLine.trim();
@@ -17,24 +27,30 @@ export function parseSshConfig(file = path.join(os.homedir(), '.ssh', 'config'),
     const key = m[1].toLowerCase();
     const value = m[2].trim().replace(/^"(.*)"$/, '$1');
     if (key === 'include' && depth < 3) {
-      for (const pat of value.split(/\s+/)) {
-        const p = pat.startsWith('/') ? pat : path.join(os.homedir(), '.ssh', pat);
-        if (fs.existsSync(p)) entries.push(...parseSshConfig(p, depth + 1));
-      }
+      for (const pat of value.split(/\s+/)) for (const p of expandInclude(pat)) entries.push(...parseSshConfig(p, depth + 1));
       continue;
     }
     if (key === 'host') {
-      current = value.split(/\s+/).filter((h) => !h.includes('*') && !h.includes('?') && !h.startsWith('!')).map((host) => ({ host }));
-      entries.push(...current);
+      const names = value.split(/\s+/);
+      current = names.filter((h) => !h.includes('*') && !h.includes('?') && !h.startsWith('!')).map((host) => ({ host }));
+      if (names.length === 1 && names[0] === '*') current = [defaults];
+      else entries.push(...current);
       continue;
     }
     if (key === 'match') { current = []; continue; }
     for (const e of current) {
       if (key === 'hostname') e.hostName = value;
-      else if (key === 'user') e.user = value;
-      else if (key === 'port') e.port = parseInt(value, 10);
+      else if (key === 'user' && !e.user) e.user = value;
+      else if (key === 'port' && !e.port) e.port = parseInt(value, 10);
       else if (key === 'identityfile' && !e.identityFile) e.identityFile = value.replace(/^~/, os.homedir());
-      else if (key === 'proxyjump') e.proxyJump = value;
+      else if (key === 'proxyjump' && !e.proxyJump) e.proxyJump = value;
+    }
+  }
+  if (depth === 0) {
+    for (const e of entries) {
+      if (!e.user && defaults.user) e.user = defaults.user;
+      if (!e.port && defaults.port) e.port = defaults.port;
+      if (!e.identityFile && defaults.identityFile) e.identityFile = defaults.identityFile;
     }
   }
   return entries;

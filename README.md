@@ -107,7 +107,8 @@ Prebuilt desktop packages are produced by the release workflow for macOS, Linux 
   sent to the UI or to a helper.
 - After a password login, **Set up key login** installs your public key on the machine (like `ssh-copy-id`, generating an
   ed25519 key if you have none), verifies key auth and forgets the password.
-- The control plane binds `127.0.0.1` and requires a token; host keys are pinned on first use. See [SECURITY.md](SECURITY.md).
+- The control plane binds `127.0.0.1` and requires a token; host keys are pinned on first use. A `ProxyJump` bastion is
+  reached with agent/key auth only — it never sees the target machine's password. See [SECURITY.md](SECURITY.md).
 
 ## Configuration
 

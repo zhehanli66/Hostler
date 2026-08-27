@@ -258,6 +258,8 @@ export interface MachineState {
   authMethod?: string | null;
   /** last connect failed with an authentication error; the UI should ask for a password */
   needsPassword?: boolean;
+  /** the pinned SSH host key changed; no automatic reconnects until the user removes the pin */
+  hostKeyMismatch?: boolean;
   /** a password is available (memory or encrypted store) without being exposed to the UI */
   hasPassword?: boolean;
 }

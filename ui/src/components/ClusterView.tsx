@@ -2,7 +2,7 @@ import React, { useContext, useEffect, useState } from 'react';
 import type { ClusterJobDetail, ClusterPartition, ClusterStatus, MachineState, SessionInfo } from '@shared/types';
 import { AppCtx } from '../App';
 import { api } from '../api';
-import { classNames, pct } from '../util';
+import { classNames, pct, shq } from '../util';
 import { Icon } from './icons';
 
 /** Poll the scheduler for as long as the view is on screen. */
@@ -79,7 +79,7 @@ export function ClusterView({ machine: m }: { machine: MachineState }) {
   /** open a terminal that lives inside the job's allocation */
   const shell = async (jobId: string, workdir?: string | null) => {
     const spec = { type: 'custom', name: `job ${jobId} shell`, cwd: workdir || m.hello?.home || '~', workspace: workdir || m.hello?.home || '~',
-      command: `srun --jobid=${jobId} --overlap --pty bash -l`, cols: 120, rows: 32 };
+      command: `srun --jobid=${shq(jobId)} --overlap --pty bash -l`, cols: 120, rows: 32 };
     const r = await api.act('open job shell', () => api.rpc<SessionInfo>(m.config.id, 'session.create', { spec }));
     if (r) select({ machineId: m.config.id, sessionId: r.id });
   };
@@ -88,7 +88,7 @@ export function ClusterView({ machine: m }: { machine: MachineState }) {
     if (!d) return;
     if (!d.stdout) { api.toast('warn', `job ${jobId} has no StdOut path`); return; }
     const spec = { type: 'custom', name: `job ${jobId} output`, cwd: d.workdir || m.hello?.home || '~', workspace: d.workdir || m.hello?.home || '~',
-      command: `tail -n 200 -F ${JSON.stringify(d.stdout)}`, cols: 120, rows: 32 };
+      command: `tail -n 200 -F ${shq(d.stdout)}`, cols: 120, rows: 32 };
     const r = await api.act('tail job output', () => api.rpc<SessionInfo>(m.config.id, 'session.create', { spec }));
     if (r) select({ machineId: m.config.id, sessionId: r.id });
   };

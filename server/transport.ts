@@ -49,6 +49,32 @@ export function helperSource() {
 const REMOTE_DIR = '.hostler';
 const REMOTE_FILE = 'hostler_helper.py';
 
+/** "1.2.10" vs "1.2.9" -> 1; non-numeric parts compare as 0 */
+export function compareVersions(a: string, b: string): number {
+  const pa = a.split('.').map((x) => parseInt(x, 10) || 0), pb = b.split('.').map((x) => parseInt(x, 10) || 0);
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const d = (pa[i] || 0) - (pb[i] || 0);
+    if (d) return d < 0 ? -1 : 1;
+  }
+  return 0;
+}
+
+/** A helper file newer than the bundled one stays: two Hostler clients of different versions would otherwise keep replacing each other's helper. */
+function keepNewerRemote(remoteText: string, log: (m: string) => void): boolean {
+  const src = helperSource();
+  const remoteVersion = remoteText.match(/^VERSION\s*=\s*"([^"]+)"/m)?.[1];
+  if (remoteVersion && compareVersions(remoteVersion, src.version) > 0) {
+    log(`remote helper ${remoteVersion} is newer than the bundled ${src.version}; keeping it (update Hostler here to upgrade it)`);
+    return true;
+  }
+  return false;
+}
+
+/** Wrap a POSIX shell snippet so it runs correctly whatever the remote login shell is (sshd hands commands to fish/tcsh too). */
+export function posixSh(script: string): string {
+  return `sh -c '${script.replace(/'/g, `'\\''`)}'`;
+}
+
 // ---------------------------------------------------------------- local
 
 export class LocalTransport implements Transport {
@@ -63,7 +89,7 @@ export class LocalTransport implements Transport {
     fs.mkdirSync(path.dirname(this.file), { recursive: true, mode: 0o700 });
     let current = '';
     try { current = fs.readFileSync(this.file, 'utf8'); } catch { /* missing */ }
-    if (current !== src.text) {
+    if (current !== src.text && !keepNewerRemote(current, log)) {
       fs.writeFileSync(this.file, src.text, { mode: 0o600 });
       log(`helper ${src.version} installed to ${this.file}`);
     }
@@ -149,7 +175,7 @@ export class SshTransport implements Transport {
     const r = this.resolved();
     let sock: Duplex | undefined;
     if (r.proxyJump) {
-      log(`connecting via jump host ${r.proxyJump}`);
+      log(`connecting via jump host ${r.proxyJump} (agent / key auth)`);
       const jumpEntry = findSshHost(r.proxyJump);
       const m = r.proxyJump.match(/^(?:([^@]+)@)?([^:]+)(?::(\d+))?$/);
       const jumpCfg = {
@@ -158,7 +184,8 @@ export class SshTransport implements Transport {
         user: m?.[1] || jumpEntry?.user || os.userInfo().username,
         identityFile: jumpEntry?.identityFile,
       };
-      this.jump = await this.connectClient(jumpCfg, log, this.password);
+      // the password belongs to the target machine — a bastion is often a different trust domain, so it never sees it
+      this.jump = await this.connectClient(jumpCfg, log, undefined);
       sock = await new Promise<Duplex>((resolve, reject) =>
         this.jump!.forwardOut('127.0.0.1', 0, r.host, r.port, (err, stream) => (err ? reject(err) : resolve(stream))));
     }
@@ -171,7 +198,7 @@ export class SshTransport implements Transport {
     const b64 = Buffer.from(publicKeyLine + '\n').toString('base64');
     const script = `umask 077; mkdir -p ~/.ssh && chmod 700 ~/.ssh && touch ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys && ` +
       `K="$(printf %s ${b64} | base64 -d)" && if grep -qxF "$K" ~/.ssh/authorized_keys; then echo EXISTS; else printf '%s\n' "$K" >> ~/.ssh/authorized_keys && echo ADDED; fi`;
-    const r = await this.exec(script, 20000);
+    const r = await this.exec(posixSh(script), 20000);
     if (r.code !== 0) throw new Error(`could not install key: ${r.stderr || r.stdout}`);
     return r.stdout.trim();
   }
@@ -185,7 +212,7 @@ export class SshTransport implements Transport {
       `df -PT "$HOME" 2>/dev/null | tail -1 | awk '{print "FSTYPE " $2}'; ` +
       `grep -Eih '^[[:space:]]*(pubkeyauthentication|authorizedkeysfile|strictmodes)' /etc/ssh/sshd_config 2>/dev/null | sed 's/^/SSHD /'`;
     let out = '';
-    try { out = (await this.exec(script, 15000)).stdout; } catch { return ''; }
+    try { out = (await this.exec(posixSh(script), 15000)).stdout; } catch { return ''; }
     const modes = new Map<string, number>();
     let fstype = '';
     const sshd: string[] = [];
@@ -243,20 +270,25 @@ export class SshTransport implements Transport {
         methods.push({ type: 'password', username: r.user, password });
         methods.push({
           type: 'keyboard-interactive', username: r.user,
-          prompt: (_n: string, _i: string, _l: string, prompts: any[], finish: (a: string[]) => void) => finish(prompts.map(() => password)),
+          // only a password prompt gets the password; a verification-code / OTP prompt must not
+          prompt: (_n: string, _i: string, _l: string, prompts: any[], finish: (a: string[]) => void) =>
+            finish(prompts.map((p) => (/pass(word|phrase)|密码/i.test(String(p?.prompt ?? p)) ? password : ''))),
         });
       }
       let idx = 0;
-      const known = loadKnownHosts();
       const hostKey = `${r.host}:${r.port}`;
+      let hostKeyMismatch = false;
       const conf: ConnectConfig = {
         host: r.host, port: r.port, username: r.user, sock: sock as any,
         readyTimeout: 25000, keepaliveInterval: 10000, keepaliveCountMax: 3,
         hostHash: 'sha256',
         hostVerifier: (hash: any, cb: (ok: boolean) => void) => {
           const h = typeof hash === 'string' ? hash : Buffer.from(hash).toString('base64');
+          // (re)load right before deciding: two first-time connections in parallel must not overwrite each other's pin
+          const known = loadKnownHosts();
           if (!known[hostKey]) { known[hostKey] = h; saveKnownHosts(known); log(`host key for ${hostKey} recorded (sha256:${h.slice(0, 16)}…)`); cb(true); return; }
           if (known[hostKey] === h) { cb(true); return; }
+          hostKeyMismatch = true;
           log(`HOST KEY MISMATCH for ${hostKey}! remove it from known_hosts.json in the config dir if this is expected`);
           cb(false);
         },
@@ -270,6 +302,12 @@ export class SshTransport implements Transport {
       };
       client.once('ready', () => resolve(client));
       client.once('error', (e) => {
+        if (hostKeyMismatch) {
+          const err: any = new Error(`host key of ${hostKey} changed — refusing to connect. If the machine was reinstalled, delete its entry from known_hosts.json in the config dir`);
+          err.hostKeyMismatch = true;
+          reject(err);
+          return;
+        }
         const auth = /authentication methods failed|auth/i.test(e.message) || (e as any).level === 'client-authentication';
         const err: any = new Error(`ssh: ${e.message}${methods.length === 0 ? ' (no ssh-agent, keys or password available)' : ''}`);
         err.authFailed = auth;
@@ -299,29 +337,31 @@ export class SshTransport implements Transport {
 
   async deploy(log: (m: string) => void): Promise<DeployResult> {
     const src = helperSource();
-    const probe = await this.exec('echo "HOME=$HOME"; for p in ' + (this.cfg.pythonPath ? `"${this.cfg.pythonPath}" ` : '') + 'python3 python; do if command -v "$p" >/dev/null 2>&1; then echo "PY=$(command -v "$p")"; break; fi; done; uname -m');
+    const probe = await this.exec(posixSh('echo "HOME=$HOME"; for p in ' + (this.cfg.pythonPath ? `"${this.cfg.pythonPath}" ` : '') + 'python3 python; do if command -v "$p" >/dev/null 2>&1; then echo "PY=$(command -v "$p")"; break; fi; done; uname -m'));
     this.home = probe.stdout.match(/^HOME=(.*)$/m)?.[1]?.trim() || '';
     this.python = probe.stdout.match(/^PY=(.*)$/m)?.[1]?.trim() || '';
-    if (!this.home) throw new Error('could not determine remote $HOME');
+    if (!this.home) throw new Error(`could not determine remote $HOME${probe.stderr ? ': ' + probe.stderr.trim().slice(0, 200) : ''}`);
     if (!this.python) throw new Error('python3 not found on remote (install python3, or set pythonPath in the machine settings)');
     const remoteDir = `${this.home}/${REMOTE_DIR}`;
     const remoteFile = `${remoteDir}/${REMOTE_FILE}`;
-    const ver = await this.exec(`"${this.python}" "${remoteFile}" version 2>/dev/null; echo; sha256sum "${remoteFile}" 2>/dev/null | cut -d' ' -f1`);
+    const ver = await this.exec(posixSh(`"${this.python}" "${remoteFile}" version 2>/dev/null; echo; sha256sum "${remoteFile}" 2>/dev/null | cut -d" " -f1`));
     const [remoteVersion, remoteSha] = ver.stdout.trim().split(/\s+/);
-    if (remoteSha !== src.sha) {
+    if (remoteSha !== src.sha && !(remoteVersion && compareVersions(remoteVersion, src.version) > 0)) {
       log(`uploading helper ${src.version} (remote: ${remoteVersion || 'none'})`);
-      await this.exec(`mkdir -p "${remoteDir}" && chmod 700 "${remoteDir}"`);
+      await this.exec(posixSh(`mkdir -p "${remoteDir}" && chmod 700 "${remoteDir}"`));
       const sftp = await this.sftp();
       await new Promise<void>((resolve, reject) => sftp.writeFile(remoteFile, src.text, { mode: 0o600 } as any, (e: any) => (e ? reject(e) : resolve())));
       sftp.end();
+    } else if (remoteSha !== src.sha) {
+      log(`remote helper ${remoteVersion} is newer than the bundled ${src.version}; keeping it (update Hostler here to upgrade it)`);
     }
-    const ens = await this.exec(`"${this.python}" "${remoteFile}" ensure`, 40000);
+    const ens = await this.exec(posixSh(`"${this.python}" "${remoteFile}" ensure`), 40000);
     if (ens.code !== 0 && !ens.stdout.includes('{')) throw new Error(`helper ensure failed: ${ens.stderr || ens.stdout}`);
     log(`ensure: ${ens.stdout.trim().split('\n').pop()}`);
     const dep = parseDeploy(ens.stdout);
     if (dep.sock) this.sockPath = dep.sock;
     if (!dep.running) {
-      const tail = await this.exec(`tail -n 25 "${remoteDir}/helper.log" 2>/dev/null`).catch(() => ({ stdout: '' } as any));
+      const tail = await this.exec(posixSh(`tail -n 25 "${remoteDir}/helper.log" 2>/dev/null`)).catch(() => ({ stdout: '' } as any));
       for (const l of (tail.stdout || '').trim().split('\n').filter(Boolean).slice(-25)) log(`helper.log: ${l}`);
       dep.error = [dep.error, (tail.stdout || '').trim().split('\n').filter(Boolean).slice(-4).join(' | ')].filter(Boolean).join(' — ');
     }
@@ -336,7 +376,7 @@ export class SshTransport implements Transport {
       c.openssh_forwardOutStreamLocal(sockPath, (err: Error | undefined, stream: Duplex) => {
         if (!err) return resolve(stream);
         log(`streamlocal forwarding unavailable (${err.message}); falling back to relay`);
-        this.client!.exec(`"${this.python}" "${this.home}/${REMOTE_DIR}/${REMOTE_FILE}" relay`, (e2, ch) => {
+        this.client!.exec(posixSh(`"${this.python}" "${this.home}/${REMOTE_DIR}/${REMOTE_FILE}" relay`), (e2, ch) => {
           if (e2) return reject(e2);
           ch.stderr.on('data', (d: Buffer) => log('relay: ' + d.toString().trim()));
           resolve(ch);

@@ -5,8 +5,14 @@ type Listener = () => void;
 type Handler = (msg: any) => void;
 
 function getToken(): string {
-  const q = new URLSearchParams(location.search).get('token');
-  if (q) { try { localStorage.setItem('hostler_token', q); } catch { /* ignore */ } return q; }
+  const params = new URLSearchParams(location.search);
+  const q = params.get('token');
+  if (q) {
+    try { localStorage.setItem('hostler_token', q); } catch { /* ignore */ }
+    // keep the token out of the address bar, browser history and any Referer
+    try { params.delete('token'); const rest = params.toString(); history.replaceState(null, '', location.pathname + (rest ? '?' + rest : '') + location.hash); } catch { /* ignore */ }
+    return q;
+  }
   try { return localStorage.getItem('hostler_token') || ''; } catch { return ''; }
 }
 

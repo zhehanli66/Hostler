@@ -22,7 +22,18 @@ export async function startServer(opts: { port?: number; host?: string; uiDir?: 
   const manager = new MachineManager();
   const uiDir = opts.uiDir || findUiDir();
 
+  // Anything a browser can be made to send here (any web page can fetch() 127.0.0.1) must at worst get an
+  // error response — an exception escaping this handler would take the whole control plane down.
   const httpServer = http.createServer((req, res) => {
+    try {
+      serveHttp(req, res);
+    } catch (e: any) {
+      if (!res.headersSent) { res.statusCode = 400; res.setHeader('content-type', 'text/plain'); }
+      res.end('bad request');
+    }
+  });
+
+  function serveHttp(req: http.IncomingMessage, res: http.ServerResponse) {
     const url = new URL(req.url || '/', 'http://x');
     if (url.pathname === '/api/health') {
       res.setHeader('content-type', 'application/json');
@@ -34,10 +45,14 @@ export async function startServer(opts: { port?: number; host?: string; uiDir?: 
       res.end('Hostler control plane is running. UI not built: run `npm run build:ui` (or use `npm run dev`).');
       return;
     }
-    let p = path.normalize(decodeURIComponent(url.pathname));
+    let decoded: string;
+    try { decoded = decodeURIComponent(url.pathname); } catch { res.statusCode = 400; res.end('bad request'); return; }
+    let p = path.normalize(decoded);
     if (p === '/' || p === '\\') p = '/index.html';
     const file = path.join(uiDir, p);
-    if (!file.startsWith(uiDir) || !fs.existsSync(file) || fs.statSync(file).isDirectory()) {
+    let stat: fs.Stats | null = null;
+    if (file.startsWith(uiDir + path.sep)) { try { stat = fs.statSync(file); } catch { stat = null; } }
+    if (!stat || stat.isDirectory()) {
       // SPA fallback
       res.setHeader('content-type', 'text/html; charset=utf-8');
       fs.createReadStream(path.join(uiDir, 'index.html')).pipe(res);
@@ -45,13 +60,21 @@ export async function startServer(opts: { port?: number; host?: string; uiDir?: 
     }
     res.setHeader('content-type', MIME[path.extname(file)] || 'application/octet-stream');
     fs.createReadStream(file).pipe(res);
-  });
+  }
+
+  const tokenOk = (given: string | null) => {
+    if (!token) return true;
+    if (!given) return false;
+    const a = Buffer.from(given), b = Buffer.from(token);
+    return a.length === b.length && crypto.timingSafeEqual(a, b);
+  };
 
   const wss = new WebSocketServer({ noServer: true });
   httpServer.on('upgrade', (req, socket, head) => {
-    const url = new URL(req.url || '/', 'http://x');
+    let url: URL;
+    try { url = new URL(req.url || '/', 'http://x'); } catch { socket.destroy(); return; }
     if (url.pathname !== '/ws') { socket.destroy(); return; }
-    if (token && url.searchParams.get('token') !== token) {
+    if (!tokenOk(url.searchParams.get('token'))) {
       socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
       socket.destroy();
       return;

@@ -44,14 +44,11 @@ export class MachineConn extends EventEmitter {
   }
 
   async connect(password?: string, remember?: boolean) {
+    // a password is only persisted once the machine has accepted it (see below) — never a wrong one
+    const persistPassword = password !== undefined && !!remember && secretBackend() !== 'none';
     if (password !== undefined) {
       this.password = password;
       this.state.needsPassword = false;
-      if (remember && secretBackend() !== 'none') {
-        this.config.password = password;
-        this.config.savePassword = true;
-        this.emit('config-changed');
-      }
     }
     this.wantConnected = true;
     if (this.reconnectTimer) { clearTimeout(this.reconnectTimer); this.reconnectTimer = null; }
@@ -61,12 +58,18 @@ export class MachineConn extends EventEmitter {
       this.setStatus('connecting');
       this.transport = makeTransport(this.config, this.password);
       await this.transport.open((m) => this.note(m));
+      if (persistPassword && this.password !== undefined) {
+        this.config.password = this.password;
+        this.config.savePassword = true;
+        this.emit('config-changed');
+      }
       this.setStatus('deploying');
       const dep = await this.transport.deploy((m) => this.note(m));
       if (!dep.running) throw new Error(dep.error || 'helper failed to start');
       this.state.helperUpgradePending = dep.upgrade_pending || null;
       this.state.authMethod = this.transport instanceof SshTransport ? this.transport.authMethod : 'local';
       this.state.needsPassword = false;
+      this.state.hostKeyMismatch = false;
       const stream = await this.transport.connectHelper((m) => this.note(m));
       const client = new HelperClient(stream);
       this.client = client;
@@ -87,9 +90,14 @@ export class MachineConn extends EventEmitter {
       this.cleanup();
       if (e.authFailed) {
         // wrong/missing credentials: do not hammer the server, ask the user instead
+        const hadPassword = this.password !== undefined || !!this.config.password;
         this.state.needsPassword = true;
         this.password = undefined;
-        this.setStatus('error', this.password === undefined && !this.config.password ? 'authentication failed — a password is needed' : e.message);
+        this.setStatus('error', hadPassword ? e.message : 'authentication failed — a password is needed');
+      } else if (e.hostKeyMismatch) {
+        // a changed host key is a decision for the user, not something to retry every 30 s
+        this.state.hostKeyMismatch = true;
+        this.setStatus('error', e.message);
       } else {
         this.setStatus('error', e.message);
         this.scheduleReconnect();

@@ -64,6 +64,9 @@ export function runningSubagents(s: SessionInfo): Subagent[] {
 
 export function classNames(...xs: (string | false | null | undefined)[]) { return xs.filter(Boolean).join(' '); }
 
+/** POSIX single-quote a value for a shell command line (nothing inside expands, unlike double quotes). */
+export function shq(s: string) { return `'${String(s).replace(/'/g, `'\\''`)}'`; }
+
 /** keep the tail of a long path (the interesting end), with a leading ellipsis */
 export function tailPath(p: string, max = 36) {
   return p.length <= max ? p : '…' + p.slice(p.length - max);

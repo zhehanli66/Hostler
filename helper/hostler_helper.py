@@ -38,6 +38,7 @@ import select
 import shlex
 import signal
 import socket
+import stat
 import struct
 import subprocess
 import sys
@@ -48,7 +49,7 @@ import traceback
 import uuid
 from collections import OrderedDict, deque
 
-VERSION = "0.1.5"
+VERSION = "0.1.6"
 PROTOCOL = 1
 
 AM_DIR = os.environ.get("HOSTLER_DIR") or os.path.join(os.path.expanduser("~"), ".hostler")
@@ -88,6 +89,44 @@ def sock_candidates():
             seen.add(p)
             uniq.append(p)
     return uniq
+
+
+def _private_dir_ok(d):
+    """True when `d` is a real directory owned by us that no other user can write to."""
+    try:
+        st = os.lstat(d or ".")
+    except OSError:
+        return False
+    return stat.S_ISDIR(st.st_mode) and st.st_uid == os.getuid() and not (st.st_mode & 0o022)
+
+
+def _owned_socket(path):
+    try:
+        st = os.lstat(path)
+    except OSError:
+        return False
+    return stat.S_ISSOCK(st.st_mode) and st.st_uid == os.getuid()
+
+
+def _sock_trusted(path):
+    """A socket we may talk to: our own, inside a directory only we can write to.
+
+    On a shared machine (a cluster login node, say) anything else may be another user's
+    impostor — e.g. a pre-created /tmp/hostler-<our uid>/ holding their socket, which would
+    receive every keystroke the control plane forwards.
+    """
+    return _owned_socket(path) and _private_dir_ok(os.path.dirname(path))
+
+
+def _helper_pid_alive():
+    """pid from the pid file when that process still is a hostler helper, else None."""
+    try:
+        pid = int((read_file(PID_PATH, "") or "").strip())
+    except ValueError:
+        return None
+    if pid <= 1 or pid == os.getpid() or read_proc(pid) is None:
+        return None
+    return pid if "hostler_helper" in " ".join(proc_cmdline(pid)) else None
 
 
 def _self_sha():
@@ -1935,6 +1974,8 @@ class SessionManager(object):
 
     def create(self, spec):
         sid = spec.get("id") or uuid.uuid4().hex[:12]
+        if not re.match(r"^[A-Za-z0-9_.-]{1,64}$", str(sid)):
+            raise ValueError("bad session id")      # it names the log file
         s = Session(sid, spec)
         with self.lock:
             if sid in self.sessions:
@@ -2140,6 +2181,10 @@ class SessionManager(object):
                 s.logfile.close()
             except Exception:
                 pass
+        try:
+            os.unlink(os.path.join(LOGS_DIR, "%s.log" % s.id))   # it holds the full terminal output; nothing reads it any more
+        except OSError:
+            pass
         self.save_registry()
         self.server.broadcast({"ev": "session.removed", "id": sid})
         return True
@@ -2150,9 +2195,12 @@ class SessionManager(object):
         while True:
             with self.lock:
                 fds = dict((s.fd, s) for s in self.sessions.values() if s.fd is not None)
-            rl = list(fds.keys()) + [self.wake_r]
+            # poll(), not select(): select() refuses fd numbers >= 1024, which a long-lived helper reaches
+            poller = select.poll()
+            for fd in list(fds.keys()) + [self.wake_r]:
+                poller.register(fd, select.POLLIN | select.POLLHUP | select.POLLERR)
             try:
-                r, _, _ = select.select(rl, [], [], 1.0)
+                r = [fd for fd, _ in poller.poll(1000)]
             except (OSError, ValueError):
                 time.sleep(0.05)
                 continue
@@ -2193,19 +2241,24 @@ class SessionManager(object):
         except OSError:
             pass
         s.fd = None
-        self.reap(block_pid=s.pid)
+        # The child normally exits the moment its tty is gone, so pick the exit status up right away
+        # and the session flips to "exited" without delay. Never *block* on it though: this thread pumps
+        # every session's output, and a root process that ignores SIGHUP after closing its tty (nohup,
+        # daemonizing servers) can live on for hours. Monitor.tick reaps such a one later.
+        deadline = time.time() + 1.0
+        while s.status == "running" and time.time() < deadline:
+            self.reap()
+            if s.status != "running":
+                break
+            time.sleep(0.02)
 
     # ----- child reaping
 
-    def reap(self, block_pid=None):
-        """Reap exited children (sessions + orphans adopted through the subreaper)."""
+    def reap(self):
+        """Reap exited children (sessions + orphans adopted through the subreaper). Never blocks."""
         while True:
             try:
-                if block_pid:
-                    pid, status = os.waitpid(block_pid, 0)
-                    block_pid = None
-                else:
-                    pid, status = os.waitpid(-1, os.WNOHANG)
+                pid, status = os.waitpid(-1, os.WNOHANG)
             except ChildProcessError:
                 return
             except OSError:
@@ -2276,6 +2329,9 @@ class SessionManager(object):
             data = json.loads(read_file(REGISTRY_PATH, "") or read_file(LEGACY_REGISTRY_PATH, "{}"))
         except ValueError:
             return
+        if not isinstance(data, dict):
+            log("registry %s is not an object; ignoring it", REGISTRY_PATH)
+            return
         for d in data.get("sessions") or []:
             try:
                 spec = d.get("spec") or {}
@@ -2301,6 +2357,18 @@ class SessionManager(object):
                         self.sessions[s.id] = s
             except Exception as e:
                 log("registry restore failed for %s: %s", d.get("id"), e)
+
+
+def helper_ancestors():
+    out, pid, depth = set(), HELPER_PID, 0
+    while pid > 1 and depth < 64:
+        p = read_proc(pid)
+        if p is None:
+            break
+        pid = p.ppid
+        out.add(pid)
+        depth += 1
+    return out
 
 
 def descendants(procs, root):
@@ -2672,6 +2740,9 @@ class Client(object):
                 if not chunk:
                     break
                 buf += chunk
+                if len(buf) > 64 * 1024 * 1024:
+                    log("%s: dropping client, %d bytes without a newline", self.name, len(buf))
+                    break
                 while b"\n" in buf:
                     line, buf = buf.split(b"\n", 1)
                     if not line.strip():
@@ -2805,6 +2876,9 @@ class Server(object):
             return True
         if op == "adopt":
             pid = int(req["pid"])
+            if pid < 2 or pid == HELPER_PID or pid in helper_ancestors():
+                # Stop/Kill on an adopted session signals its whole descendant tree
+                raise ValueError("refusing to adopt pid %d: the helper itself or one of its ancestors" % pid)
             with sm.lock:
                 for s in sm.sessions.values():
                     if s.adopted and s.adopted_pid == pid:
@@ -2897,7 +2971,11 @@ class Server(object):
                 d = os.path.dirname(cand)
                 if d and not os.path.isdir(d):
                     os.makedirs(d, 0o700)
-                if os.path.exists(cand):
+                if not _private_dir_ok(d):
+                    raise OSError("%s is not a directory owned by uid %d that only we can write to" % (d, os.getuid()))
+                if os.path.lexists(cand):
+                    if not _owned_socket(cand):
+                        raise OSError("%s exists and is not our socket" % cand)
                     os.unlink(cand)
                 s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
                 s.bind(cand)
@@ -2974,6 +3052,9 @@ def probe():
     global SOCK_PATH
     for cand in sock_candidates():
         if os.path.exists(cand):
+            if not _sock_trusted(cand):
+                log("ignoring %s: not a socket owned by us inside a private directory", cand)
+                continue
             hello = _probe_one(cand)
             if hello:
                 SOCK_PATH = cand
@@ -3001,6 +3082,8 @@ def _probe_one(path):
 
 
 def rpc(op, **kw):
+    if not _sock_trusted(SOCK_PATH):
+        raise OSError("%s is not a socket owned by us inside a private directory" % SOCK_PATH)
     s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     s.settimeout(10)
     s.connect(SOCK_PATH)
@@ -3048,6 +3131,13 @@ def cmd_start(foreground=False):
     if h:
         print(json.dumps({"running": True, "version": h["version"], "pid": h["pid"], "started_now": False, "sock": h.get("sock") or SOCK_PATH}))
         return 0
+    other = _helper_pid_alive()
+    if other:
+        # a helper that is alive but not answering must not be replaced silently: starting another
+        # one would unlink its socket and leave its PTY sessions running but unreachable
+        print(json.dumps({"running": False, "error": "helper pid %d is alive but not answering on its socket; "
+                          "`%s stop --force` ends it (its sessions are lost), or wait if the machine is just busy" % (other, os.path.abspath(__file__))}))
+        return 1
     if foreground:
         Server().serve_forever()
         return 0
@@ -3069,6 +3159,23 @@ def cmd_stop(force=False, quiet=False):
     out = (lambda *a: None) if quiet else print
     h = probe()
     if not h:
+        pid = _helper_pid_alive() if force else None
+        if pid:
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except OSError:
+                pass
+            for _ in range(30):
+                time.sleep(0.1)
+                if read_proc(pid) is None:
+                    break
+            else:
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except OSError:
+                    pass
+            out(json.dumps({"running": False, "stopped": True, "killed_pid": pid}))
+            return 0
         out(json.dumps({"running": False}))
         return 0
     try:
@@ -3084,7 +3191,7 @@ def cmd_stop(force=False, quiet=False):
             return 2
     for _ in range(50):
         time.sleep(0.1)
-        if not probe():
+        if not probe() and not _helper_pid_alive():
             out(json.dumps({"running": False, "stopped": True}))
             return 0
     out(json.dumps({"running": True, "error": "did not stop"}))
@@ -3114,6 +3221,9 @@ def cmd_ensure():
 
 def cmd_relay():
     """stdio <-> unix socket bridge (fallback when SSH streamlocal forwarding is disabled)."""
+    probe()   # pins SOCK_PATH to the (trusted) location the daemon actually answers on
+    if not _sock_trusted(SOCK_PATH):
+        raise OSError("%s is not a socket owned by us inside a private directory" % SOCK_PATH)
     s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     s.connect(SOCK_PATH)
     s.setblocking(False)

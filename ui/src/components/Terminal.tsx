@@ -34,7 +34,12 @@ export function TerminalView({ machineId, sessionId, kind, readOnly }: { machine
     const fit = new FitAddon();
     fitRef.current = fit;
     term.loadAddon(fit);
-    term.loadAddon(new WebLinksAddon());
+    // clicking a login link opens the browser; also put it on the clipboard so a desktop that
+    // refuses to open it (headless box, no default browser) is not a dead end
+    term.loadAddon(new WebLinksAddon((_e, uri) => {
+      window.open(uri, '_blank', 'noopener,noreferrer');
+      writeClipboard(uri).then((ok) => api.toast('info', ok ? 'opening in your browser · link copied to the clipboard' : 'opening in your browser'));
+    }));
     term.open(el);
     termRef.current = term;
     let disposed = false;

@@ -31,6 +31,8 @@
 }
 :root {
   --mono: "JetBrains Mono Variable", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  /* the terminal keeps the machine's own terminal font (Ubuntu Mono on Ubuntu), not the app's */
+  --term-font: "Ubuntu Mono", "Ubuntu Sans Mono", ui-monospace, Menlo, "DejaVu Sans Mono", Consolas, monospace;
   --sans: "Inter Variable", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", "PingFang SC", "Microsoft YaHei", sans-serif;
   --radius: 12px; --radius-sm: 8px;
 }
@@ -218,7 +220,7 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: 12.5px; }
 .proc-tree .num { text-align: right; font-variant-numeric: tabular-nums; color: var(--fg-2); }
 .proc-tree .row .btn { visibility: hidden; } .proc-tree .row:hover .btn { visibility: visible; }
 
-.logs { flex: 1; min-height: 0; margin: 0; padding: 12px 16px; overflow: auto; font-family: var(--mono); font-size: 11.5px; line-height: 1.45; white-space: pre-wrap; word-break: break-all; background: var(--term-bg); color: var(--term-fg); }
+.logs { flex: 1; min-height: 0; margin: 0; padding: 12px 16px; overflow: auto; font-family: var(--term-font); font-size: 11.5px; line-height: 1.45; white-space: pre-wrap; word-break: break-all; background: var(--term-bg); color: var(--term-fg); }
 
 .git-files { font-family: var(--mono); font-size: 11.5px; }
 .git-files .f { display: flex; gap: 8px; padding: 4px 8px; border-radius: 6px; cursor: pointer; }
@@ -297,4 +299,4 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: 12.5px; }
 .small { font-size: 11.5px; }
 .nowrap { white-space: nowrap; }
 .row-flex { display: flex; align-items: center; gap: 8px; }
-.log-box { font-family: var(--mono); font-size: 11px; background: var(--term-bg); color: var(--term-fg); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 8px 10px; max-height: 160px; overflow: auto; white-space: pre-wrap; }
+.log-box { font-family: var(--term-font); font-size: 11px; background: var(--term-bg); color: var(--term-fg); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 8px 10px; max-height: 160px; overflow: auto; white-space: pre-wrap; }

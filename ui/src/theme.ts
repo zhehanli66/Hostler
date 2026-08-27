@@ -20,11 +20,17 @@ export function resolvedTheme(): Resolved {
 }
 export function themePref() { return pref; }
 
+let version = 0;
+function notify() {
+  version++;
+  for (const l of listeners) l();
+}
+
 function apply() {
   const r = resolvedTheme();
   document.documentElement.dataset.theme = r;
   document.documentElement.style.colorScheme = r;
-  for (const l of listeners) l();
+  notify();
 }
 
 export function setThemePref(p: ThemePref) {
@@ -38,19 +44,60 @@ export function cycleThemePref() {
 export function onThemeChange(l: () => void) { listeners.add(l); return () => { listeners.delete(l); }; }
 
 export function useTheme() {
-  return useSyncExternalStore((l) => onThemeChange(l), () => `${pref}:${resolvedTheme()}`);
+  return useSyncExternalStore((l) => onThemeChange(l), () => `${pref}:${resolvedTheme()}:${version}`);
+}
+
+/**
+ * Terminal theme per harness: a Codex TUI drawn for a dark terminal stays readable even when
+ * the rest of Hostler is light, so each agent type keeps its own light/dark choice
+ * ('app' follows the application theme).
+ */
+export type TermThemePref = 'app' | 'light' | 'dark';
+const TERM_KEY = 'hostler_term_theme';
+let termPrefs: Record<string, TermThemePref> = (() => {
+  try { return JSON.parse(localStorage.getItem(TERM_KEY) || '{}') || {}; } catch { return {}; }
+})();
+
+export function termThemePref(kind: string): TermThemePref {
+  return termPrefs[kind] || 'app';
+}
+export function setTermThemePref(kind: string, p: TermThemePref) {
+  termPrefs = { ...termPrefs, [kind]: p };
+  try { localStorage.setItem(TERM_KEY, JSON.stringify(termPrefs)); } catch { /* ignore */ }
+  notify();
+}
+export function cycleTermThemePref(kind: string) {
+  const cur = termThemePref(kind);
+  setTermThemePref(kind, cur === 'app' ? 'light' : cur === 'light' ? 'dark' : 'app');
+}
+export function resolvedTermTheme(kind: string): Resolved {
+  const p = termThemePref(kind);
+  return p === 'app' ? resolvedTheme() : p;
 }
 
 mq?.addEventListener?.('change', () => { if (pref === 'system') apply(); });
 apply();
 
-/** xterm.js theme matching the active palette */
+/**
+ * xterm.js theme. The ANSI palette is the standard terminal one (Tango on dark, the usual
+ * light-terminal set on light) so every CLI renders in *its own* colors — Hostler only owns
+ * the background, foreground and cursor so the terminal fits the app's light/dark chrome.
+ */
 export function terminalTheme(r: Resolved = resolvedTheme()) {
   return r === 'light'
-    ? { background: '#f7f8fa', foreground: '#1f2430', cursor: '#1f2430', cursorAccent: '#f7f8fa', selectionBackground: 'rgba(91,108,255,.25)',
-        black: '#1f2430', red: '#d13b47', green: '#1a9e5c', yellow: '#b7791f', blue: '#3b5bdb', magenta: '#8b5cf6', cyan: '#0e8a8a', white: '#8a919e',
-        brightBlack: '#6b7280', brightRed: '#e0505c', brightGreen: '#22b36a', brightYellow: '#d69e2e', brightBlue: '#4c6ef5', brightMagenta: '#a78bfa', brightCyan: '#14a3a3', brightWhite: '#1f2430' }
-    : { background: '#0a0c11', foreground: '#d6dae3', cursor: '#e6e8ee', cursorAccent: '#0a0c11', selectionBackground: 'rgba(109,141,255,.35)',
-        black: '#1b1f2a', red: '#f0616f', green: '#3ecf8e', yellow: '#f6b64b', blue: '#6d8dff', magenta: '#a78bfa', cyan: '#4cc9f0', white: '#c9cfdb',
-        brightBlack: '#5b6270', brightRed: '#ff7b86', brightGreen: '#5fe0a5', brightYellow: '#ffc76b', brightBlue: '#8aa4ff', brightMagenta: '#c4b1ff', brightCyan: '#7ad9f5', brightWhite: '#ffffff' };
+    ? { background: '#ffffff', foreground: '#1f2430', cursor: '#1f2430', cursorAccent: '#ffffff', selectionBackground: 'rgba(91,108,255,.25)',
+        black: '#000000', red: '#cd3131', green: '#00bc00', yellow: '#949800', blue: '#0451a5', magenta: '#bc05bc', cyan: '#0598bc', white: '#555555',
+        brightBlack: '#666666', brightRed: '#cd3131', brightGreen: '#14ce14', brightYellow: '#b5ba00', brightBlue: '#0451a5', brightMagenta: '#bc05bc', brightCyan: '#0598bc', brightWhite: '#a5a5a5' }
+    : { background: '#0a0c11', foreground: '#d3d7cf', cursor: '#e6e8ee', cursorAccent: '#0a0c11', selectionBackground: 'rgba(109,141,255,.35)',
+        black: '#2e3436', red: '#cc0000', green: '#4e9a06', yellow: '#c4a000', blue: '#3465a4', magenta: '#75507b', cyan: '#06989a', white: '#d3d7cf',
+        brightBlack: '#555753', brightRed: '#ef2929', brightGreen: '#8ae234', brightYellow: '#fce94f', brightBlue: '#729fcf', brightMagenta: '#ad7fa8', brightCyan: '#34e2e2', brightWhite: '#eeeeec' };
+}
+
+/** The terminal font stack (single source of truth: the --term-font CSS variable). */
+export function terminalFont(): string {
+  try {
+    const v = getComputedStyle(document.documentElement).getPropertyValue('--term-font').trim();
+    if (v) return v;
+  } catch { /* ignore */ }
+  return 'monospace';
 }

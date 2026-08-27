@@ -83,7 +83,7 @@ export function AgentView({ machine: m, session: s }: { machine: MachineState; s
         ))}
       </div>
       {tab === 'terminal' && (s.has_pty || s.scrollback_bytes > 0 ? (
-        <div className="tabpanel"><TerminalView machineId={mid} sessionId={s.id} readOnly={!s.has_pty} /></div>
+        <div className="tabpanel"><TerminalView machineId={mid} sessionId={s.id} kind={s.type} readOnly={!s.has_pty} /></div>
       ) : (
         <div className="tabpanel pad"><div className="empty"><Icon name="terminal" size={22} /><div>
           This agent was adopted from an existing process, so its terminal is not attached to Hostler.

@@ -52,16 +52,43 @@ VERSION = "0.1.5"
 PROTOCOL = 1
 
 AM_DIR = os.environ.get("HOSTLER_DIR") or os.path.join(os.path.expanduser("~"), ".hostler")
-SOCK_PATH = os.path.join(AM_DIR, "helper.sock")
+SOCK_PATH = os.path.join(AM_DIR, "helper.sock")   # may move to local disk, see sock_candidates()
 PID_PATH = os.path.join(AM_DIR, "helper.pid")
 LOG_PATH = os.path.join(AM_DIR, "helper.log")
 LOGS_DIR = os.path.join(AM_DIR, "logs")
-REGISTRY_PATH = os.path.join(AM_DIR, "sessions.json")
+HOSTNAME = socket.gethostname().split(".")[0]
+REGISTRY_PATH = os.path.join(AM_DIR, "sessions-%s.json" % re.sub(r"[^A-Za-z0-9_.-]", "-", HOSTNAME))
+LEGACY_REGISTRY_PATH = os.path.join(AM_DIR, "sessions.json")
 
 SCROLLBACK_BYTES = 1 * 1024 * 1024      # in-memory ring buffer per session
 LOGFILE_MAX_BYTES = 16 * 1024 * 1024    # on-disk log cap per session (truncated to half)
 STATE_INTERVAL = 2.0                     # seconds between state snapshots
 TRANSCRIPT_TAIL_START = 12 * 1024 * 1024 # if a transcript is bigger, start parsing near the end
+
+def sock_candidates():
+    """Where the helper socket may live, best first.
+
+    A unix socket on an NFS (or CIFS) home binds fine and then refuses every connection, so a
+    machine whose $HOME comes from a NAS needs the socket on local disk. The daemon proves each
+    candidate by connecting to it before committing, and reports the one it kept.
+    """
+    out = []
+    if os.environ.get("HOSTLER_SOCK"):
+        out.append(os.environ["HOSTLER_SOCK"])
+    out.append(os.path.join(AM_DIR, "helper.sock"))
+    # /tmp before $XDG_RUNTIME_DIR: /run/user/<uid> is torn down when the user's last session
+    # ends, and the whole point of the helper is to outlive the ssh session
+    out.append(os.path.join("/tmp", "hostler-%d" % os.getuid(), "helper.sock"))
+    rt = os.environ.get("XDG_RUNTIME_DIR")
+    if rt:
+        out.append(os.path.join(rt, "hostler", "helper.sock"))
+    seen, uniq = set(), []
+    for p in out:
+        if p not in seen:
+            seen.add(p)
+            uniq.append(p)
+    return uniq
+
 
 def _self_sha():
     try:
@@ -1274,14 +1301,15 @@ class OpenCodeIntrospector(object):
 TOOL_NAMES = ("claude", "codex", "opencode", "tmux", "git", "curl", "npm", "nvidia-smi", "python3")
 
 
-def probe_tools():
-    """Locate the CLIs Hostler cares about: PATH, common user dirs, a login shell, IDE bundles."""
+def probe_tools(deep=True):
+    """Locate the CLIs Hostler cares about: PATH, common user dirs, IDE bundles, and — when
+    `deep` — a login shell (slow on machines with a heavy profile, so never on the startup path)."""
     tools = {}
     for t in TOOL_NAMES:
         tools[t] = which(t)
     # a login shell finds agents installed through nvm / asdf / custom rc files
     missing = [t for t in ("claude", "codex", "opencode") if not tools[t]]
-    if missing:
+    if deep and missing:
         shell = os.environ.get("SHELL") or "/bin/bash"
         rc, out, _ = run_cmd([shell, "-lic", "for t in %s; do printf '%%s=%%s\\n' $t \"$(command -v $t)\"; done" % " ".join(missing)], timeout=8)
         for line in out.splitlines():
@@ -2031,7 +2059,7 @@ class SessionManager(object):
     def load_registry(self):
         """Re-attach adopted sessions from a previous helper run; mark PTY sessions as lost."""
         try:
-            data = json.loads(read_file(REGISTRY_PATH, "{}"))
+            data = json.loads(read_file(REGISTRY_PATH, "") or read_file(LEGACY_REGISTRY_PATH, "{}"))
         except ValueError:
             return
         for d in data.get("sessions") or []:
@@ -2095,15 +2123,15 @@ class Monitor(object):
         self.tmux_t = 0
         self.thread = threading.Thread(target=self.loop, name="monitor")
         self.thread.daemon = True
-        self.hello = self.build_hello()
+        self.hello = self.build_hello(deep=False)   # the slow probe runs once the socket is up
 
-    def build_hello(self):
+    def build_hello(self, deep=True):
         import pwd
         try:
             user = pwd.getpwuid(os.getuid()).pw_name
         except Exception:
             user = os.environ.get("USER", "?")
-        tools = probe_tools()
+        tools = probe_tools(deep=deep)
         os_name = None
         for line in (read_file("/etc/os-release") or "").splitlines():
             if line.startswith("PRETTY_NAME="):
@@ -2126,6 +2154,10 @@ class Monitor(object):
         self.thread.start()
 
     def loop(self):
+        try:
+            self.rescan_tools()          # the login-shell probe, off the startup path
+        except Exception:
+            log("tool probe failed: %s", traceback.format_exc())
         while True:
             t0 = time.time()
             try:
@@ -2636,12 +2668,37 @@ class Server(object):
             os.chmod(AM_DIR, 0o700)
         except OSError:
             pass
-        if os.path.exists(SOCK_PATH):
-            os.unlink(SOCK_PATH)
-        srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        srv.bind(SOCK_PATH)
-        os.chmod(SOCK_PATH, 0o600)
-        srv.listen(16)
+        global SOCK_PATH
+        srv = None
+        for cand in sock_candidates():
+            s = None
+            try:
+                d = os.path.dirname(cand)
+                if d and not os.path.isdir(d):
+                    os.makedirs(d, 0o700)
+                if os.path.exists(cand):
+                    os.unlink(cand)
+                s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                s.bind(cand)
+                os.chmod(cand, 0o600)
+                s.listen(16)
+                probe_sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)   # NFS binds but refuses
+                probe_sock.settimeout(2)
+                probe_sock.connect(cand)
+                probe_sock.close()
+                srv, SOCK_PATH = s, cand
+                break
+            except (OSError, IOError) as e:
+                log("socket %s is not usable (%s); trying the next location", cand, e)
+                for cleanup in (lambda: s.close(), lambda: os.unlink(cand)):
+                    try:
+                        cleanup()
+                    except Exception:
+                        pass
+        if srv is None:
+            log("no usable socket location; giving up")
+            raise SystemExit(1)
+        self.monitor.hello["sock"] = SOCK_PATH
         with open(PID_PATH, "w") as f:
             f.write(str(HELPER_PID))
         self.sm.load_registry()
@@ -2689,13 +2746,25 @@ class Server(object):
 # --------------------------------------------------------------------------- CLI
 
 def probe():
-    """Connect to a running helper and return its hello dict (or None)."""
-    if not os.path.exists(SOCK_PATH):
-        return None
+    """Connect to a running helper and return its hello dict (or None).
+
+    Also pins SOCK_PATH to the location that answered, so rpc()/stop talk to the same daemon.
+    """
+    global SOCK_PATH
+    for cand in sock_candidates():
+        if os.path.exists(cand):
+            hello = _probe_one(cand)
+            if hello:
+                SOCK_PATH = cand
+                return hello
+    return None
+
+
+def _probe_one(path):
     try:
         s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         s.settimeout(3)
-        s.connect(SOCK_PATH)
+        s.connect(path)
         s.sendall(b'{"id":1,"op":"hello","client":"probe"}\n')
         buf = b""
         while b"\n" not in buf:
@@ -2756,22 +2825,20 @@ def daemonize():
 def cmd_start(foreground=False):
     h = probe()
     if h:
-        print(json.dumps({"running": True, "version": h["version"], "pid": h["pid"], "started_now": False}))
+        print(json.dumps({"running": True, "version": h["version"], "pid": h["pid"], "started_now": False, "sock": h.get("sock") or SOCK_PATH}))
         return 0
-    if os.path.exists(SOCK_PATH):
-        os.unlink(SOCK_PATH)
     if foreground:
         Server().serve_forever()
         return 0
     if daemonize():
         Server().serve_forever()
         os._exit(0)
-    # parent: wait until the socket answers
-    for _ in range(60):
+    # parent: wait until the socket answers (an NFS home or a busy login node is not fast)
+    for _ in range(200):
         time.sleep(0.1)
         h = probe()
         if h:
-            print(json.dumps({"running": True, "version": h["version"], "pid": h["pid"], "started_now": True}))
+            print(json.dumps({"running": True, "version": h["version"], "pid": h["pid"], "started_now": True, "sock": h.get("sock") or SOCK_PATH}))
             return 0
     print(json.dumps({"running": False, "error": "helper did not come up; see " + LOG_PATH}))
     return 1
@@ -2808,7 +2875,7 @@ def cmd_ensure():
     Starts the helper if needed; upgrades it when the running version differs and no session is running."""
     h = probe()
     if h and (h.get("sha") or h["version"]) == (SELF_SHA if h.get("sha") else VERSION):
-        print(json.dumps({"running": True, "version": VERSION, "pid": h["pid"], "upgraded": False}))
+        print(json.dumps({"running": True, "version": VERSION, "pid": h["pid"], "upgraded": False, "sock": h.get("sock") or SOCK_PATH}))
         return 0
     if h:
         try:
@@ -2817,7 +2884,7 @@ def cmd_ensure():
         except Exception:
             running = []
         if running:
-            print(json.dumps({"running": True, "version": h["version"], "pid": h["pid"], "upgrade_pending": VERSION,
+            print(json.dumps({"running": True, "version": h["version"], "pid": h["pid"], "upgrade_pending": VERSION, "sock": h.get("sock") or SOCK_PATH,
                               "reason": "%d session(s) running" % len(running)}))
             return 0
         cmd_stop(force=True, quiet=True)

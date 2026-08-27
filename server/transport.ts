@@ -10,7 +10,7 @@ import type { MachineConfig } from '../shared/types';
 import { findSshHost, defaultIdentityFiles } from './sshconfig';
 import { loadKnownHosts, saveKnownHosts } from './config';
 
-export interface DeployResult { running: boolean; version?: string; pid?: number; upgrade_pending?: string; reason?: string; error?: string }
+export interface DeployResult { running: boolean; version?: string; pid?: number; upgrade_pending?: string; reason?: string; error?: string; /** where the daemon actually listens (a NAS home cannot host the socket) */ sock?: string }
 
 export interface Transport {
   /** Establish the underlying connection (ssh handshake). No-op for local. */
@@ -52,7 +52,7 @@ const REMOTE_FILE = 'hostler_helper.py';
 // ---------------------------------------------------------------- local
 
 export class LocalTransport implements Transport {
-  private sock = path.join(process.env.HOSTLER_DIR || path.join(os.homedir(), REMOTE_DIR), 'helper.sock');
+  private sock = path.join(process.env.HOSTLER_DIR || path.join(os.homedir(), REMOTE_DIR), 'helper.sock');   // the helper may move it to local disk
   private file = path.join(process.env.HOSTLER_DIR || path.join(os.homedir(), REMOTE_DIR), REMOTE_FILE);
   constructor(private cfg: MachineConfig) {}
 
@@ -70,7 +70,15 @@ export class LocalTransport implements Transport {
     const py = this.cfg.pythonPath || 'python3';
     const out = await runLocal(py, [this.file, 'ensure']);
     log(`ensure: ${out.trim()}`);
-    return parseDeploy(out);
+    const dep = parseDeploy(out);
+    if (dep.sock) this.sock = dep.sock;
+    if (!dep.running) {
+      let tail = '';
+      try { tail = fs.readFileSync(path.join(path.dirname(this.file), 'helper.log'), 'utf8').trim().split('\n').slice(-25).join('\n'); } catch { /* no log */ }
+      for (const l of tail.split('\n').filter(Boolean)) log(`helper.log: ${l}`);
+      dep.error = [dep.error, tail.split('\n').filter(Boolean).slice(-4).join(' | ')].filter(Boolean).join(' — ');
+    }
+    return dep;
   }
 
   connectHelper(): Promise<Duplex> {
@@ -119,6 +127,7 @@ export class SshTransport implements Transport {
   private client: SshClient | null = null;
   private jump: SshClient | null = null;
   private home = '';
+  private sockPath = '';
   private python = '';
   /** auth method that succeeded for the target host */
   authMethod: string | null = null;
@@ -272,11 +281,18 @@ export class SshTransport implements Transport {
     const ens = await this.exec(`"${this.python}" "${remoteFile}" ensure`, 40000);
     if (ens.code !== 0 && !ens.stdout.includes('{')) throw new Error(`helper ensure failed: ${ens.stderr || ens.stdout}`);
     log(`ensure: ${ens.stdout.trim().split('\n').pop()}`);
-    return parseDeploy(ens.stdout);
+    const dep = parseDeploy(ens.stdout);
+    if (dep.sock) this.sockPath = dep.sock;
+    if (!dep.running) {
+      const tail = await this.exec(`tail -n 25 "${remoteDir}/helper.log" 2>/dev/null`).catch(() => ({ stdout: '' } as any));
+      for (const l of (tail.stdout || '').trim().split('\n').filter(Boolean).slice(-25)) log(`helper.log: ${l}`);
+      dep.error = [dep.error, (tail.stdout || '').trim().split('\n').filter(Boolean).slice(-4).join(' | ')].filter(Boolean).join(' — ');
+    }
+    return dep;
   }
 
   connectHelper(log: (m: string) => void): Promise<Duplex> {
-    const sockPath = `${this.home}/${REMOTE_DIR}/helper.sock`;
+    const sockPath = this.sockPath || `${this.home}/${REMOTE_DIR}/helper.sock`;
     return new Promise((resolve, reject) => {
       if (!this.client) return reject(new Error('not connected'));
       const c: any = this.client;

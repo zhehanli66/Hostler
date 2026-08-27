@@ -170,6 +170,25 @@ except RuntimeError as e:
     c.call("shutdown", force=True)
 time.sleep(0.6)
 check(not os.path.exists(SOCK), "socket removed after shutdown")
+
+# a directory that cannot host a unix socket (an NFS home, or here: a path over sun_path's
+# 108 bytes) must not stop the helper — it moves the socket to local disk and says where
+FAR = os.path.join(tempfile.mkdtemp(prefix="am-test-far-"), "x" * 120, "hostler")
+os.makedirs(FAR)
+far_env = dict(os.environ, HOSTLER_DIR=FAR)
+out = json.loads(subprocess.check_output([sys.executable, HELPER, "ensure"], env=far_env).decode())
+check(out.get("running") and out.get("sock") and not out["sock"].startswith(FAR), "socket relocated to %s" % out.get("sock"))
+try:
+    s2 = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s2.settimeout(5)
+    s2.connect(out["sock"])
+    s2.sendall(b'{"id":1,"op":"hello","client":"test"}\n')
+    hello = json.loads(s2.recv(1 << 16).split(b"\n")[0].decode())["result"]
+    s2.close()
+    check(hello["sock"] == out["sock"], "relocated helper answers and reports its socket")
+except Exception as e:
+    check(False, "relocated helper unreachable: %s" % e)
+subprocess.call([sys.executable, HELPER, "stop"], env=far_env, stdout=subprocess.DEVNULL)
 print("\nhelper log tail:")
 print(open(os.path.join(TMP, "helper.log")).read()[-1500:])
 print("FAILURES:", failures)

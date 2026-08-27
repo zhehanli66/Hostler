@@ -185,6 +185,28 @@ H.AGENT_BINS["claude"] = binp
 check(H.build_argv({"type": "claude", "cwd": cwd})[1].startswith(binp + " --session-id "), "a session launches the resolved binary, not the bare name")
 H.AGENT_BINS.pop("claude", None)
 
+# ----------------------------------------------------------------- cluster login node
+bindir = os.path.join(HOME, "fakebin")
+os.makedirs(bindir)
+def fake(name, body):
+    p = os.path.join(bindir, name)
+    with open(p, "w") as f:
+        f.write("#!/bin/sh\n" + body)
+    os.chmod(p, 0o755)
+fake("sinfo", "cat <<'OUT'\ngpu*|up|4|idle|0/256/0/256|gpu:a100:4\ngpu*|up|12|mixed|380/388/0/768|gpu:a100:4\ngpu*|up|2|down*|0/0/128/128|gpu:a100:4\ncpu|up|8|idle|0/512/0/512|(null)\nOUT\n")
+fake("squeue", "cat <<'OUT'\n1842317|gpu|train-resnet|RUNNING|4:21:07|1-00:00:00|1|node[07]\n1842401|gpu|sweep-lr|PENDING|0:00|8:00:00|2|(Resources)\nOUT\n")
+os.environ["PATH"] = bindir + os.pathsep + os.environ["PATH"]
+c = H.detect_cluster()
+check(c and c["kind"] == "slurm", "a machine with scheduler clients is detected as a cluster node")
+cs = H.cluster_status()
+gpu = [p for p in cs["partitions"] if p["name"] == "gpu"][0]
+check(len(cs["partitions"]) == 2 and gpu["default"] and gpu["nodes"] == 18, "sinfo rows are aggregated per partition")
+check(gpu["states"] == {"idle": 4, "mixed": 12, "down": 2} and gpu["gres"] == "gpu:a100:4", "node states summed, slurm state suffixes stripped")
+check(gpu["cpus"] == {"alloc": 380, "idle": 644, "other": 128, "total": 1152}, "cpu counts summed across states")
+check(len(cs["jobs"]) == 2 and cs["jobs"][1]["state"] == "PENDING" and cs["jobs"][1]["reason"] == "(Resources)", "squeue rows parsed")
+os.environ["PATH"] = os.environ["PATH"].split(os.pathsep, 1)[1]
+check(H.detect_cluster() is None, "a machine without a scheduler is not a cluster node")
+
 # ----------------------------------------------------------------- helpers
 check(H.classify_agent(["node", "/x/node_modules/@anthropic-ai/claude-code/cli.js", "--resume"])[0] == "claude", "classify: claude cli.js")
 check(H.classify_agent(["/home/u/.local/bin/codex", "-c", "x", "app-server"])[0] == "codex", "classify: codex")

@@ -73,12 +73,49 @@ export function demoMachines(): { machines: MachineState[]; workspaces: Workspac
     config: { id: 'demo-ws', name: 'lab-workstation', transport: 'ssh', host: 'lab-ws-03', user: 'dev', createdAt: 0 },
     status: 'error', error: 'connection lost', needsPassword: false, hasPassword: false, sessions: [], discovered: [],
   };
+  const hpc: MachineState = {
+    config: { id: 'demo-hpc', name: 'hpc-login', transport: 'ssh', host: 'login.cluster.example', user: 'dev', createdAt: 0, keyInstalled: false },
+    status: 'connected', error: null, authMethod: 'password', hasPassword: true, connectedAt: Date.now() - 1200e3, lastUpdate: Date.now(),
+    hello: { version: '0.1.5', protocol: 1, pid: 9931, hostname: 'login1', user: 'dev', home: '/home/dev', shell: '/bin/bash', os: 'Rocky Linux 9.4', arch: 'x86_64', python: '3.9.18',
+      tools: { claude: '/home/dev/.local/bin/claude', codex: null, opencode: null, tmux: '/usr/bin/tmux', git: '/usr/bin/git', curl: '/usr/bin/curl', npm: null, 'nvidia-smi': null, python3: '/usr/bin/python3' },
+      subreaper: true, gpu_kind: null, cluster: { kind: 'slurm', tools: { sinfo: '/usr/bin/sinfo', squeue: '/usr/bin/squeue', sbatch: '/usr/bin/sbatch' } },
+      sock: '/tmp/hostler-5001/helper.sock', started: t - 1200 },
+    resources: { cpu_pct: 8, cores: 64, load: [2.1, 1.8, 1.7], mem_total: 256e9, mem_used: 31e9, mem_available: 225e9, swap_total: 0, swap_used: 0,
+      disk: { path: '/home/dev', total: 39e12, free: 35e12 }, uptime: 86400 * 61, gpus: [] },
+    discovered: [],
+    sessions: [
+      session({ id: 'h1', name: 'prepare sweep configs', type: 'claude', cwd: '/home/dev/experiments', command: 'claude --session-id 41ab…', pid: 8801,
+        processes: [{ pid: 8801, ppid: 9931, name: 'node', state: 'S', cmd: 'claude --session-id 41ab…', cpu: 3, rss: 350e6, started: t - 900, detached: false, root: true }],
+        activity: { kind: 'claude', status: 'idle', current_tool: null, pending_tools: [], last_text: 'Wrote 12 sbatch scripts under experiments/sweeps/ and submitted the first two.', last_prompt: 'Generate the sbatch files for the lr sweep', last_ts: iso(120),
+          model: 'claude-opus-5', usage: { input: 2100, output: 9400, cache_read: 210000 }, title: 'Slurm sweep scripts', turns: 4, tool_calls: 22, session_id: '41ab-1', transcript: null, age: 120, subagents: [] } }),
+    ],
+    history: Array.from({ length: 60 }, (_, i) => ({ t: Date.now() - (60 - i) * 2000, cpu: 6 + 4 * Math.sin(i / 7), mem: 12, gpu: 0, vram: 0 })),
+  };
   const workspaces: WorkspaceConfig[] = [
     { id: 'w1', machineId: 'demo-gpu', path: '/home/dev/src/vision-pipeline', name: 'vision-pipeline', createdAt: 0 },
     { id: 'w2', machineId: 'demo-gpu', path: '/home/dev/src/api-gateway', name: 'api-gateway', createdAt: 0 },
     { id: 'w3', machineId: 'demo-jetson', path: '/home/nvidia/ros2_ws', name: 'ros2_ws', createdAt: 0 },
+    { id: 'w4', machineId: 'demo-hpc', path: '/home/dev/experiments', name: 'experiments', createdAt: 0 },
   ];
-  return { machines: [gpu, jetson, laptop], workspaces };
+  return { machines: [gpu, jetson, hpc, laptop], workspaces };
+}
+
+/** Synthetic `cluster.status` for the demo login node. */
+export function demoCluster() {
+  return {
+    kind: 'slurm',
+    partitions: [
+      { name: 'gpu', default: true, avail: 'up', nodes: 18, states: { idle: 4, mixed: 12, down: 2 }, cpus: { alloc: 380, idle: 644, other: 128, total: 1152 }, gres: 'gpu:a100:4' },
+      { name: 'cpu', default: false, avail: 'up', nodes: 48, states: { allocated: 40, idle: 8 }, cpus: { alloc: 2560, idle: 512, other: 0, total: 3072 }, gres: null },
+      { name: 'debug', default: false, avail: 'up', nodes: 2, states: { idle: 2 }, cpus: { alloc: 0, idle: 128, other: 0, total: 128 }, gres: null },
+    ],
+    jobs: [
+      { id: '1842317', partition: 'gpu', name: 'train-resnet-seed3', state: 'RUNNING', time: '4:21:07', limit: '1-00:00:00', nodes: 1, reason: 'node[07]' },
+      { id: '1842401', partition: 'gpu', name: 'sweep-lr', state: 'PENDING', time: '0:00', limit: '8:00:00', nodes: 2, reason: '(Resources)' },
+      { id: '1842402', partition: 'cpu', name: 'preprocess-shards', state: 'RUNNING', time: '18:44', limit: '2:00:00', nodes: 1, reason: 'node[41]' },
+    ],
+    error: null,
+  };
 }
 
 /** Synthetic `history.list` answers so the demo shows resumable past conversations. */

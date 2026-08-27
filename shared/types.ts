@@ -50,8 +50,35 @@ export interface HelperHello {
   tools: Record<string, string | null>;
   subreaper: boolean;
   gpu_kind?: 'nvidia' | 'jetson' | null;
+  /** set when the machine can talk to a batch scheduler, i.e. it is a cluster login/submit node */
+  cluster?: ClusterInfo | null;
   sock: string;
   started: number;
+}
+
+export interface ClusterInfo { kind: string; tools: Record<string, string | null> }
+
+export interface ClusterPartition {
+  name: string;
+  /** the scheduler's default partition */
+  default?: boolean;
+  avail: string;
+  nodes: number;
+  /** node count per scheduler state: idle / mixed / allocated / down … */
+  states: Record<string, number>;
+  cpus?: { alloc: number; idle: number; other: number; total: number } | null;
+  gres?: string | null;
+}
+
+export interface ClusterJob { id: string; partition: string; name: string; state: string; time: string; limit: string; nodes: number; reason: string }
+
+export interface ClusterStatus {
+  kind: string | null;
+  partitions: ClusterPartition[];
+  jobs: ClusterJob[];
+  error?: string | null;
+  /** a scheduler Hostler does not parse yet */
+  unsupported?: boolean;
 }
 
 export interface GpuInfo {

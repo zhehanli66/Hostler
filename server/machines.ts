@@ -6,7 +6,7 @@ import type { AppState, MachineConfig, MachineState, WorkspaceConfig } from '../
 import { loadConfig, saveConfig, newId, secretBackend, type ConfigData } from './config';
 import { HelperClient } from './helperClient';
 import { makeTransport, helperSource, ensureLocalKey, SshTransport, type Transport } from './transport';
-import { demoHistory, demoMachines, tickDemo } from './demo';
+import { demoCluster, demoHistory, demoMachines, tickDemo } from './demo';
 
 const log = (...a: any[]) => console.log(new Date().toISOString().slice(11, 19), ...a);
 
@@ -253,6 +253,7 @@ export class MachineManager extends EventEmitter {
         conn.connect = async () => undefined;
         conn.rpc = async (op: string, params: Record<string, any> = {}) => {
           if (op === 'history.list') return demoHistory(params.cwd || '/home/dev/src/vision-pipeline');
+          if (op === 'cluster.status') return demoCluster();
           throw new Error('demo mode: this machine is not real');
         };
         this.machines.set(st.config.id, conn);

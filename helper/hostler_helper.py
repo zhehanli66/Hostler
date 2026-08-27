@@ -1321,6 +1321,101 @@ def probe_tools(deep=True):
     return tools
 
 
+# --------------------------------------------------------------------------- cluster (login nodes)
+#
+# A login/submit node is simply a machine with a scheduler client on it — that is a far better
+# signal than a hostname called "login". Everything here is read-only.
+
+SCHEDULERS = [("slurm", ("sinfo", "squeue", "sbatch")),
+              ("pbs", ("qstat", "qsub")),
+              ("lsf", ("bjobs", "bsub")),
+              ("sge", ("qhost", "qsub"))]
+
+
+def detect_cluster():
+    for kind, cmds in SCHEDULERS:
+        tools = dict((c, which(c)) for c in cmds)
+        if tools[cmds[0]]:
+            return {"kind": kind, "tools": tools}
+    return None
+
+
+def _sched_run(cmd, args, timeout=12):
+    """Run a scheduler client; fall back to a login shell for module-based installs."""
+    exe = which(cmd)
+    if exe:
+        rc, out, err = run_cmd([exe] + args, timeout=timeout)
+        if rc == 0:
+            return out, ""
+        return out, (err or "").strip()
+    shell = os.environ.get("SHELL") or "/bin/bash"
+    rc, out, err = run_cmd([shell, "-lc", shlex_join([cmd] + args)], timeout=timeout + 8)
+    return out, ("" if rc == 0 else (err or "").strip() or "%s not found" % cmd)
+
+
+def _slurm_status(limit=400):
+    """One row per partition (sinfo reports partition x node-state), plus this user's jobs."""
+    st = {"kind": "slurm", "partitions": [], "jobs": [], "error": None}
+    out, err = _sched_run("sinfo", ["-h", "-o", "%P|%a|%D|%T|%C|%G"])
+    if err:
+        st["error"] = truncate(err, 200)
+    parts = OrderedDict()
+    for line in out.splitlines()[:limit]:
+        f = line.split("|")
+        if len(f) < 4:
+            continue
+        raw = f[0].strip()
+        name = raw.rstrip("*")
+        p = parts.get(name)
+        if p is None:
+            p = parts[name] = {"name": name, "default": raw.endswith("*"), "avail": f[1].strip(),
+                               "nodes": 0, "states": OrderedDict(), "cpus": None, "gres": None}
+        nodes = int(f[2]) if f[2].strip().isdigit() else 0
+        state = f[3].strip().rstrip("*~#$@")          # idle~ / down* are still idle / down
+        p["nodes"] += nodes
+        p["states"][state] = p["states"].get(state, 0) + nodes
+        if len(f) > 4 and f[4].count("/") == 3:
+            try:
+                a, i, o, t = [int(x) for x in f[4].split("/")]
+                c = p["cpus"] or {"alloc": 0, "idle": 0, "other": 0, "total": 0}
+                p["cpus"] = {"alloc": c["alloc"] + a, "idle": c["idle"] + i, "other": c["other"] + o, "total": c["total"] + t}
+            except ValueError:
+                pass
+        g = (f[5].strip() if len(f) > 5 else "")
+        if g and g != "(null)" and not p["gres"]:
+            p["gres"] = g
+    st["partitions"] = list(parts.values())
+    out, err = _sched_run("squeue", ["-h", "-u", os.environ.get("USER") or _login_name(), "-o", "%i|%P|%j|%T|%M|%l|%D|%R"])
+    if err and not st["error"]:
+        st["error"] = truncate(err, 200)
+    for line in out.splitlines()[:limit]:
+        f = line.split("|")
+        if len(f) < 8:
+            continue
+        st["jobs"].append({"id": f[0].strip(), "partition": f[1].strip(), "name": truncate(f[2].strip(), 60),
+                           "state": f[3].strip(), "time": f[4].strip(), "limit": f[5].strip(),
+                           "nodes": int(f[6]) if f[6].strip().isdigit() else 0, "reason": truncate(f[7].strip(), 80)})
+    return st
+
+
+def _login_name():
+    try:
+        import pwd
+        return pwd.getpwuid(os.getuid()).pw_name
+    except Exception:
+        return ""
+
+
+def cluster_status():
+    """Queues and this user's jobs, for a machine that can talk to a scheduler."""
+    c = detect_cluster()
+    if not c:
+        return {"kind": None, "partitions": [], "jobs": []}
+    if c["kind"] == "slurm":
+        return _slurm_status()
+    return {"kind": c["kind"], "partitions": [], "jobs": [], "unsupported": True}
+
+
 def make_introspector(kind, cwd, started=None, session_id=None, owner=None):
     if kind == "claude":
         return ClaudeIntrospector(cwd, session_id=session_id, started=started, owner=owner)
@@ -2140,6 +2235,7 @@ class Monitor(object):
             "version": VERSION, "sha": SELF_SHA, "protocol": PROTOCOL, "pid": HELPER_PID, "hostname": socket.gethostname(),
             "user": user, "home": os.path.expanduser("~"), "shell": os.environ.get("SHELL"), "os": os_name,
             "arch": os.uname().machine, "python": sys.version.split()[0], "tools": tools, "subreaper": self.subreaper,
+            "cluster": detect_cluster(),
             "gpu_kind": self.res.gpu_kind if hasattr(self.res, "gpu_kind") else ("nvidia" if self.res.nvidia_smi else ("jetson" if self.res.jetson else None)),
             "sock": SOCK_PATH, "started": time.time(),
         }
@@ -2620,6 +2716,8 @@ class Server(object):
             return self.monitor.discovered
         if op == "resources":
             return self.monitor.res.sample_system()
+        if op == "cluster.status":
+            return cluster_status()
         if op == "tools.rescan":
             return self.monitor.rescan_tools()
         if op == "history.list":

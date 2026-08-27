@@ -4,17 +4,20 @@ import { AppCtx } from '../App';
 import { api } from '../api';
 import { ActivityCard, SubagentList } from './Activity';
 import { TerminalView } from './Terminal';
+import { ChatView } from './Chat';
 import { ProcessTree } from './ProcessTree';
 import { GitPanel } from './GitPanel';
 import { LogsView } from './Logs';
 import { ago, classNames, fmtBytes, runningSubagents, sessionTone, shortPath, shq, TYPE_LABEL } from '../util';
 import { Icon, TypeAvatar } from './icons';
 
-type Tab = 'terminal' | 'activity' | 'processes' | 'logs' | 'git';
+type Tab = 'chat' | 'terminal' | 'activity' | 'processes' | 'logs' | 'git';
+const HAS_TRANSCRIPT = ['claude', 'codex', 'opencode'];
 
 export function AgentView({ machine: m, session: s }: { machine: MachineState; session: SessionInfo }) {
   const { select, openModal } = useContext(AppCtx);
-  const [tab, setTab] = useState<Tab>('terminal');
+  const chattable = HAS_TRANSCRIPT.includes(s.type);
+  const [tab, setTab] = useState<Tab>(chattable ? 'chat' : 'terminal');
   const [renaming, setRenaming] = useState(false);
   const [name, setName] = useState(s.name);
   const live = s.status === 'running' || s.status === 'adopted';
@@ -56,7 +59,7 @@ export function AgentView({ machine: m, session: s }: { machine: MachineState; s
         {!live && <button className="btn ghost" onClick={remove}><Icon name="trash" size={14} /> Remove</button>}
         {live && s.adopted && <button className="btn ghost" title="stop tracking this process (does not kill it)" onClick={remove}><Icon name="x" size={14} /> Forget</button>}
       </div>
-      <div className="agent-hero">
+      {tab !== 'chat' && <div className="agent-hero">
           <div className="card">
             <h3><Icon name="activity" size={13} /> Activity {s.activity?.kind && <span className="sub">· from the {s.activity.kind} transcript</span>}</h3>
             {live || s.activity ? <ActivityCard activity={s.activity} /> : <div className="muted">process exited</div>}
@@ -71,17 +74,18 @@ export function AgentView({ machine: m, session: s }: { machine: MachineState; s
               <dt>Started</dt><dd>{ago(s.started || s.created)}{s.restarts ? ` · restarted ${s.restarts}×` : ''}{s.ended ? ` · ended ${ago(s.ended)}` : ''}</dd>
             </dl>
           </div>
-      </div>
-      <div className="tabs" style={{ marginTop: 12 }}>
-        {(['terminal', 'activity', 'processes', 'logs', 'git'] as Tab[]).map((t) => (
+      </div>}
+      <div className="tabs" style={tab === 'chat' ? undefined : { marginTop: 12 }}>
+        {((chattable ? ['chat', 'terminal', 'activity', 'processes', 'logs', 'git'] : ['terminal', 'activity', 'processes', 'logs', 'git']) as Tab[]).map((t) => (
           <button key={t} className={classNames('tab', tab === t && 'active')} onClick={() => setTab(t)}>
-            <Icon name={t === 'terminal' ? 'terminal' : t === 'activity' ? 'layers' : t === 'processes' ? 'list' : t === 'logs' ? 'log' : 'branch'} size={13} />
+            <Icon name={t === 'chat' ? 'send' : t === 'terminal' ? 'terminal' : t === 'activity' ? 'layers' : t === 'processes' ? 'list' : t === 'logs' ? 'log' : 'branch'} size={13} />
             {t === 'activity' ? 'Subagents' : t[0].toUpperCase() + t.slice(1)}
             {t === 'activity' && (s.activity?.subagents?.length ? <span className="count">{subs.length}/{s.activity.subagents.length}</span> : null)}
             {t === 'processes' && <span className="count">{s.processes.length}</span>}
           </button>
         ))}
       </div>
+      {tab === 'chat' && <div className="tabpanel"><ChatView machineId={mid} session={s} /></div>}
       {tab === 'terminal' && (s.has_pty || s.scrollback_bytes > 0 ? (
         <div className="tabpanel"><TerminalView machineId={mid} sessionId={s.id} kind={s.type} readOnly={!s.has_pty} /></div>
       ) : (

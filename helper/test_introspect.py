@@ -260,6 +260,178 @@ check(gpu2["gpus"] == {"alloc": 2, "idle": 4, "total": 8} and gpu2["mem"] is Non
 os.environ["PATH"] = os.environ["PATH"].split(os.pathsep, 1)[1]
 check(H.detect_cluster() is None, "a machine without a scheduler is not a cluster node")
 
+# ----------------------------------------------------------------- chat transcripts
+chat_path = os.path.join(proj, sid + ".jsonl")
+cm = H.chat_messages("claude", chat_path, limit=50)["messages"]
+check([m["role"] for m in cm] == ["user", "assistant", "assistant", "assistant", "assistant"], "chat: tool results fold into the call, not into a message (%s)" % [m["role"] for m in cm])
+check(cm[0]["text"] == "Fix the failing tests", "chat: user prompt")
+check(cm[1]["text"] == "Let me look." and [t["name"] for t in cm[1]["tools"]] == ["Bash"], "chat: text and tool_use in one bubble")
+check(cm[1]["tools"][0]["output"] == "1 failing" and cm[1]["tools"][0]["status"] == "done", "chat: tool_result attaches to its call")
+check(cm[3]["tools"][0]["name"] == "Read" and cm[3]["tools"][0]["status"] == "done" and cm[4]["text"] == "Done, tests pass.",
+      "chat: a result appended later still finds its call")
+check(cm[1]["usage"]["cache_read"] == 5000 and cm[1]["model"] == "claude-x", "chat: usage and model ride along")
+
+# one assistant message split over several records (claude writes one per content block) is one bubble
+split_sid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+split = [
+    {"type": "assistant", "timestamp": "2026-01-02T10:00:00Z", "requestId": "req_1", "uuid": "u1",
+     "message": {"role": "assistant", "id": "msg_1", "model": "claude-x", "usage": {"input_tokens": 7, "output_tokens": 11, "cache_creation_input_tokens": 40, "cache_creation": {"ephemeral_1h_input_tokens": 30}},
+                 "content": [{"type": "thinking", "thinking": "hmm"}]}},
+    {"type": "assistant", "timestamp": "2026-01-02T10:00:01Z", "requestId": "req_1", "uuid": "u2",
+     "message": {"role": "assistant", "id": "msg_1", "model": "claude-x", "usage": {"input_tokens": 7, "output_tokens": 11, "cache_creation_input_tokens": 40, "cache_creation": {"ephemeral_1h_input_tokens": 30}},
+                 "content": [{"type": "text", "text": "done"}]}},
+    {"type": "assistant", "timestamp": "2026-01-02T10:00:02Z", "requestId": "req_2", "uuid": "u3",
+     "message": {"role": "assistant", "id": "msg_2", "model": "claude-x",
+                 "content": [{"type": "tool_use", "id": "t9", "name": "Grep", "input": {"pattern": "x"}}]}},
+]
+jsonl(os.path.join(proj, split_sid + ".jsonl"), split)
+sm = H.chat_messages("claude", os.path.join(proj, split_sid + ".jsonl"), limit=50)["messages"]
+check(len(sm) == 2 and sm[0]["thinking"] == "hmm" and sm[0]["text"] == "done", "chat: records sharing a message id merge into one bubble (%d)" % len(sm))
+check(sm[1]["tools"][0]["status"] == "running", "chat: a call with no result yet is still running")
+
+crollout = os.path.join(HOME, ".codex", "sessions", "2026", "01", "01", "rollout-2026-01-01T10-00-00-cx.jsonl")
+jsonl(crollout, [
+    {"type": "session_meta", "timestamp": "2026-01-01T10:00:00Z", "payload": {"id": "cx", "cwd": cwd, "model": "gpt-x"}},
+    {"type": "event_msg", "timestamp": "2026-01-01T10:00:01Z", "payload": {"type": "user_message", "message": "run the tests"}},
+    {"type": "event_msg", "timestamp": "2026-01-01T10:00:02Z", "payload": {"type": "agent_message", "message": "on it"}},
+    {"type": "response_item", "timestamp": "2026-01-01T10:00:03Z", "payload": {"type": "function_call", "call_id": "c1", "name": "shell", "arguments": "{\"command\": \"pytest\"}"}},
+    {"type": "response_item", "timestamp": "2026-01-01T10:00:04Z", "payload": {"type": "function_call_output", "call_id": "c1", "output": [{"type": "input_text", "text": "2 passed"}]}},
+    {"type": "event_msg", "timestamp": "2026-01-01T10:00:05Z", "payload": {"type": "token_count", "info": {
+        "total_token_usage": {"input_tokens": 1000, "cached_input_tokens": 400, "cache_write_input_tokens": 10, "output_tokens": 50},
+        "last_token_usage": {"input_tokens": 1000, "cached_input_tokens": 400, "cache_write_input_tokens": 10, "output_tokens": 50}}}},
+    {"type": "event_msg", "timestamp": "2026-01-01T11:00:00Z", "payload": {"type": "token_count", "info": {
+        "total_token_usage": {"input_tokens": 3000, "cached_input_tokens": 900, "cache_write_input_tokens": 10, "output_tokens": 130},
+        "last_token_usage": {"input_tokens": 2000, "cached_input_tokens": 500, "cache_write_input_tokens": 0, "output_tokens": 80}}}},
+])
+xm = H.chat_messages("codex", crollout, limit=50)["messages"]
+check([m["role"] for m in xm] == ["user", "assistant"] and xm[1]["text"] == "on it", "chat/codex: user + agent message")
+check([t["name"] for t in xm[1]["tools"]] == ["shell"] and xm[1]["tools"][0]["output"] == "2 passed", "chat/codex: tool call and its output")
+check(H.chat_messages("shell", None)["error"], "chat: a session with no transcript says so")
+check(not H._transcript_path_ok("/etc/passwd") and not H._transcript_path_ok(os.path.join(HOME, "x.jsonl"))
+      and H._transcript_path_ok(chat_path), "chat: only harness session stores are readable by path")
+
+# ----------------------------------------------------------------- token usage
+entries, meta = H._usage_scan_claude(os.path.join(proj, split_sid + ".jsonl"))
+check(len(entries) == 1, "usage/claude: records repeating one message's usage are counted once (%d)" % len(entries))
+check(entries[0][:2] == ["2026-01-02T10", "claude-x"] and entries[0][3:] == [7, 11, 0, 40, 30] and entries[0][2] == H._dedupe_key("msg_1", "req_1"),
+      "usage/claude: hour bucket, model and the 1h slice of the cache write (%s)" % entries[0])
+
+centries, cmeta = H._usage_scan_codex(crollout)
+check(len(centries) == 2 and cmeta["cwd"] == cwd, "usage/codex: one entry per token_count")
+check(centries[0][3:] == [600, 50, 400, 10, 0], "usage/codex: cached reads split out of input (%s)" % centries[0][3:])
+check(centries[1][3:] == [1500, 80, 500, 0, 0], "usage/codex: per-turn delta from the running total (%s)" % centries[1][3:])
+check(centries[1][0] == "2026-01-01T11", "usage/codex: bucketed by the event's own hour")
+
+# codex repeats the closing token_count of a turn, and restarts its counter when context resets
+dup = os.path.join(HOME, ".codex", "sessions", "2026", "01", "02", "rollout-2026-01-02T10-00-00-dup.jsonl")
+def tc(ts, tin, tcached, tout, lin, lcached, lout):
+    return {"type": "event_msg", "timestamp": ts, "payload": {"type": "token_count", "info": {
+        "total_token_usage": {"input_tokens": tin, "cached_input_tokens": tcached, "cache_write_input_tokens": 0, "output_tokens": tout, "total_tokens": tin + tout},
+        "last_token_usage": {"input_tokens": lin, "cached_input_tokens": lcached, "cache_write_input_tokens": 0, "output_tokens": lout}}}}
+jsonl(dup, [
+    {"type": "session_meta", "timestamp": "2026-01-02T10:00:00Z", "payload": {"id": "dup", "cwd": cwd, "model": "gpt-x"}},
+    tc("2026-01-02T10:00:01Z", 100, 40, 10, 100, 40, 10),
+    tc("2026-01-02T10:00:02Z", 250, 90, 25, 150, 50, 15),
+    tc("2026-01-02T10:00:03Z", 250, 90, 25, 150, 50, 15),   # end-of-turn repeat: total did not move
+    tc("2026-01-02T11:00:00Z", 80, 20, 5, 80, 20, 5),       # context reset: the counter restarted
+])
+dentries, _ = H._usage_scan_codex(dup)
+check(len(dentries) == 3, "usage/codex: a repeated token_count spends nothing and is dropped (%d)" % len(dentries))
+check([e[3] + e[5] for e in dentries] == [100, 150, 80], "usage/codex: input follows the running total, not last_token_usage (%s)" % [e[3] + e[5] for e in dentries])
+check(dentries[2][:1] == ["2026-01-02T11"] and dentries[2][4] == 5, "usage/codex: a restarted counter is counted fresh, not as a negative")
+
+# codex' exec tool is handed a JS program — the row must show what it runs, not the wrapper
+name, summary = H.codex_call_summary({"type": "custom_tool_call", "name": "exec",
+    "input": 'const r = await tools.exec_command({"cmd":"npm run typecheck","workdir":"/x"});'})
+check((name, summary) == ("exec_command", "npm run typecheck"), "codex tools: exec_command shows its command (%s / %s)" % (name, summary))
+name, summary = H.codex_call_summary({"type": "custom_tool_call", "name": "exec",
+    "input": 'const results = await Promise.all([tools.exec_command({"cmd":"a b"}), tools.exec_command({"cmd":"c d"})]);'})
+check(summary == "a b ; c d", "codex tools: a Promise.all shows every command (%s)" % summary)
+name, summary = H.codex_call_summary({"type": "custom_tool_call", "name": "exec",
+    "input": 'const patch = "*** Begin Patch\\n*** Update File: /home/u/a.py\\n*** Update File: /home/u/b.py\\n";'})
+check((name, summary) == ("apply_patch", "/home/u/a.py, /home/u/b.py"), "codex tools: a patch shows its files (%s / %s)" % (name, summary))
+name, summary = H.codex_call_summary({"type": "custom_tool_call", "name": "exec",
+    "input": 'const r = await tools.view_image({"path":"/tmp/p.png","detail":"high"});'})
+check((name, summary) == ("view_image", "/tmp/p.png"), "codex tools: other calls show their own argument (%s / %s)" % (name, summary))
+check(H.codex_call_summary({"type": "function_call", "name": "spawn_agent", "arguments": '{"description":"look"}'}) == ("spawn_agent", "look"),
+      "codex tools: a plain JSON function_call is untouched")
+
+# a turn's tool calls belong to that turn's bubble, not to one bubble for the whole session
+turns = os.path.join(HOME, ".codex", "sessions", "2026", "01", "03", "rollout-2026-01-03T10-00-00-turns.jsonl")
+jsonl(turns, [
+    {"type": "session_meta", "timestamp": "2026-01-03T10:00:00Z", "payload": {"id": "t", "cwd": cwd, "model": "gpt-x"}},
+    {"type": "event_msg", "timestamp": "2026-01-03T10:00:01Z", "payload": {"type": "task_started"}},
+    {"type": "event_msg", "timestamp": "2026-01-03T10:00:02Z", "payload": {"type": "user_message", "message": "first"}},
+    {"type": "response_item", "timestamp": "2026-01-03T10:00:03Z", "payload": {"type": "custom_tool_call", "call_id": "a", "name": "exec", "input": 'await tools.exec_command({"cmd":"one"})'}},
+    {"type": "event_msg", "timestamp": "2026-01-03T10:00:04Z", "payload": {"type": "task_complete", "turn_id": "1"}},
+    {"type": "event_msg", "timestamp": "2026-01-03T10:00:05Z", "payload": {"type": "task_started"}},
+    {"type": "event_msg", "timestamp": "2026-01-03T10:00:06Z", "payload": {"type": "user_message", "message": "second"}},
+    {"type": "response_item", "timestamp": "2026-01-03T10:00:07Z", "payload": {"type": "custom_tool_call", "call_id": "b", "name": "exec", "input": 'await tools.exec_command({"cmd":"two"})'}},
+])
+tm = H.chat_messages("codex", turns, limit=50)["messages"]
+check([m["role"] for m in tm] == ["user", "assistant", "user", "assistant"], "chat/codex: each turn gets its own bubble (%s)" % [m["role"] for m in tm])
+check([len(m["tools"]) for m in tm] == [0, 1, 0, 1] and tm[3]["tools"][0]["summary"] == "two",
+      "chat/codex: a turn's tools stay with that turn (%s)" % [len(m["tools"]) for m in tm])
+
+# newer codex writes the conversation ONLY as response_item/message, and its exec programs are
+# multi-line JS with bare object keys
+NEW_EXEC = """const r = await Promise.all([
+  tools.exec_command({
+    cmd: "npm run typecheck",
+    workdir: "/home/u/proj",
+    yield_time_ms: 10000
+  }),
+  tools.exec_command({ cmd: "git status --short" })
+]);"""
+def rmsg(ts, role, text, ctype="output_text"):
+    return {"type": "response_item", "timestamp": ts, "payload": {"type": "message", "role": role, "content": [{"type": ctype, "text": text}]}}
+newer = os.path.join(HOME, ".codex", "sessions", "2026", "01", "04", "rollout-2026-01-04T10-00-00-new.jsonl")
+jsonl(newer, [
+    {"type": "session_meta", "timestamp": "2026-01-04T10:00:00Z", "payload": {"id": "n", "cwd": cwd, "model": "gpt-y"}},
+    {"type": "event_msg", "timestamp": "2026-01-04T10:00:01Z", "payload": {"type": "task_started"}},
+    rmsg("2026-01-04T10:00:02Z", "developer", "system policy blah"),
+    rmsg("2026-01-04T10:00:03Z", "user", "<recommended_plugins>noise</recommended_plugins>", "input_text"),
+    rmsg("2026-01-04T10:00:04Z", "user", "check the repo", "input_text"),
+    rmsg("2026-01-04T10:00:05Z", "assistant", "on it"),
+    {"type": "response_item", "timestamp": "2026-01-04T10:00:06Z", "payload": {"type": "custom_tool_call", "call_id": "n1", "name": "exec", "input": NEW_EXEC}},
+    {"type": "response_item", "timestamp": "2026-01-04T10:00:07Z", "payload": {"type": "custom_tool_call_output", "call_id": "n1", "output": [{"type": "input_text", "text": "ok"}]}},
+    rmsg("2026-01-04T10:00:08Z", "assistant", "all green"),
+])
+nm = H.chat_messages("codex", newer, limit=50)["messages"]
+check([m["role"] for m in nm] == ["user", "assistant", "assistant"] and nm[0]["text"] == "check the repo",
+      "chat/codex: a rollout with only response_item messages still has a conversation (%s)" % [(m["role"], m["text"][:12]) for m in nm])
+check(nm[1]["text"] == "on it" and nm[2]["text"] == "all green", "chat/codex: developer turns and injected <blocks> are not the conversation")
+check(len(nm[1]["tools"]) == 1 and nm[1]["tools"][0]["summary"] == "npm run typecheck ; git status --short",
+      "chat/codex: bare-key multi-line JS arguments are read (%s)" % (nm[1]["tools"][0]["summary"],))
+check(nm[1]["tools"][0]["name"] == "exec_command" and nm[1]["tools"][0]["output"] == "ok", "chat/codex: named after the call it makes")
+
+# a rollout carrying BOTH shapes must not render every line twice
+both = os.path.join(HOME, ".codex", "sessions", "2026", "01", "05", "rollout-2026-01-05T10-00-00-both.jsonl")
+jsonl(both, [
+    {"type": "session_meta", "timestamp": "2026-01-05T10:00:00Z", "payload": {"id": "b", "cwd": cwd, "model": "gpt-y"}},
+    rmsg("2026-01-05T10:00:01Z", "user", "hello", "input_text"),
+    {"type": "event_msg", "timestamp": "2026-01-05T10:00:01Z", "payload": {"type": "user_message", "message": "hello"}},
+    {"type": "event_msg", "timestamp": "2026-01-05T10:00:02Z", "payload": {"type": "agent_message", "message": "hi there"}},
+    rmsg("2026-01-05T10:00:02Z", "assistant", "hi there"),
+])
+bm = H.chat_messages("codex", both, limit=50)["messages"]
+check([(m["role"], m["text"]) for m in bm] == [("user", "hello"), ("assistant", "hi there")],
+      "chat/codex: the two event shapes are not rendered twice (%s)" % [(m["role"], m["text"]) for m in bm])
+
+check(H._iso_epoch("2026-01-01T10:00:00Z") == 1767261600, "usage: ISO parsing")
+check(H._iso_epoch("2026-01-01T18:00:00+08:00") == H._iso_epoch("2026-01-01T10:00:00Z"), "usage: offsets normalize to UTC")
+check(H._iso_epoch(1767261600000) == 1767261600 and H._iso_epoch("nope") is None, "usage: epoch millis and junk")
+rolled = H._usage_rollup([["h", "m", "k1", 1, 2, 3, 4, 4], ["h", "m", "k2", 10, 20, 30, 40, 0]])
+check(rolled == [["h", "m", "", 11, 22, 33, 44, 4]], "usage: rollup merges an immutable transcript and drops its keys")
+
+report = H.usage_report(days=400, force=True)
+key = "claude:claude-x"
+tot = sum(v[1] for h in report["hours"].values() for k, v in h.items() if k == key)
+check(tot == 31, "usage: report totals the fixtures (%s)" % tot)
+check(any(k.startswith("codex:") for h in report["hours"].values() for k in h), "usage: codex rollouts are in the same report")
+check(all(len(h) and all(len(v) == 6 for v in h.values()) for h in report["hours"].values()), "usage: every bucket carries the six counters")
+check(H.usage_report(days=400)["generated"] == report["generated"], "usage: a repeat poll reuses the last report")
+
 # ----------------------------------------------------------------- helpers
 check(H.classify_agent(["node", "/x/node_modules/@anthropic-ai/claude-code/cli.js", "--resume"])[0] == "claude", "classify: claude cli.js")
 check(H.classify_agent(["/home/u/.local/bin/codex", "-c", "x", "app-server"])[0] == "codex", "classify: codex")

@@ -41,6 +41,13 @@ Machine  →  Workspace (a directory)  →  Agent (persistent PTY)  →  Subagen
 - **Resume past conversations.** Every workspace lists the Claude Code / Codex / OpenCode transcripts on that machine —
   title, first prompt, branch, model, age — and one click continues one (`claude --resume`, `codex resume`,
   `opencode --session`), including conversations that were never started from Hostler.
+- **Talk to an agent as a conversation.** The **Chat** tab renders the running session's own transcript — prompts,
+  replies, collapsed reasoning, and every tool call with its output — with a composer at the bottom. Typing there
+  goes to the real CLI over the PTY, so the **Terminal** tab is still there for permission prompts and the TUI.
+- **Know what it costs.** A **Usage** view rolls every connected machine's transcripts up into today / this week /
+  this month, by day, week or month, broken down by model, agent and conversation. Anthropic list prices ship with
+  Hostler (cache reads and 5-minute vs 1-hour cache writes billed apart); other providers' models show tokens until
+  you give them a price.
 - **Native terminal** (xterm.js) plus one-line input, `^C`, `Esc`; **Stop / Kill / Restart** (Claude Code restarts with
   `--resume`); **Git status & diff** per workspace; **CPU / RAM / GPU / VRAM** per machine (NVIDIA via `nvidia-smi`, Jetson via sysfs).
 - **Cluster login nodes.** A machine with a scheduler client on it gets a **Cluster** view:

@@ -350,3 +350,76 @@ export interface HistoryEntry {
   branch?: string | null;
   model?: string | null;
 }
+
+// --------------------------------------------------------------------- chat transcripts
+
+export interface ChatToolCall {
+  id?: string | null;
+  name: string;
+  summary?: string | null;
+  output?: string | null;
+  status: 'running' | 'done' | 'error';
+}
+
+/** One conversation turn, normalized across Claude Code / Codex / OpenCode transcripts. */
+export interface ChatMessage {
+  id: string;
+  role: 'user' | 'assistant';
+  ts?: string | null;
+  text: string;
+  thinking: string;
+  model?: string | null;
+  tools: ChatToolCall[];
+  usage?: { input?: number; output?: number; cache_read?: number; cache_write?: number } | null;
+}
+
+export interface ChatResult {
+  kind: string;
+  path?: string | null;
+  session_id?: string | null;
+  mtime?: number | null;
+  messages: ChatMessage[];
+  error?: string;
+}
+
+// --------------------------------------------------------------------- token usage
+
+/** [input, output, cache_read, cache_write, cache_write_1h, messages] */
+export type UsageTotals = [number, number, number, number, number, number];
+
+export interface UsageSession {
+  kind: string;
+  id: string;
+  path: string;
+  cwd?: string | null;
+  title?: string | null;
+  mtime?: number | null;
+  model?: string | null;
+  /** UTC hour keys, "YYYY-MM-DDTHH" */
+  first?: string | null;
+  last?: string | null;
+  messages: number;
+  input: number;
+  output: number;
+  cache_read: number;
+  cache_write: number;
+  cache_write_1h: number;
+}
+
+/**
+ * One machine's spend. Buckets are UTC *hours* keyed "YYYY-MM-DDTHH", so the UI can re-bucket
+ * into the viewer's local days/weeks/months even when machines sit in different timezones;
+ * the inner key is "<kind>:<model>".
+ */
+export interface UsageReport {
+  hours: Record<string, Record<string, UsageTotals>>;
+  sessions: UsageSession[];
+  kinds: string[];
+  days: number;
+  files: number;
+  scanned: number;
+  truncated: number;
+  host: string;
+  generated: number;
+  took: number;
+}

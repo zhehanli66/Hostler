@@ -65,6 +65,26 @@ const rescan = await rpc(local, 'tools.rescan');
 check(rescan && 'claude' in rescan && 'git' in rescan, `tools.rescan ok (git=${rescan?.git ? 'found' : 'missing'}, agents=${['claude', 'codex', 'opencode'].filter((t) => rescan?.[t]).join(',') || 'none'})`);
 const hist = await rpc(local, 'history.list', { cwd: ROOT });
 check(Array.isArray(hist) && hist.every((h) => h.session_id && h.type && h.cwd === ROOT), `history.list ok (${Array.isArray(hist) ? hist.length : '?'} past conversation(s) for this repo)`);
+
+// token usage: a report over whatever transcripts this machine happens to have, and its cache
+const t0 = Date.now();
+const usage = await rpc(local, 'usage.report', { days: 30, force: true });
+const cold = Date.now() - t0;
+const hours = Object.keys(usage.hours || {});
+check(hours.every((h) => /^\d{4}-\d{2}-\d{2}T\d{2}$/.test(h)), `usage.report buckets are UTC hours (${hours.length} bucket(s), ${usage.files} transcript(s), ${cold}ms cold)`);
+check(Object.values(usage.hours).every((slots) => Object.entries(slots).every(([k, v]) => k.includes(':') && v.length === 6 && v.every((n) => Number.isFinite(n) && n >= 0))),
+  'usage.report totals are six non-negative counters keyed <kind>:<model>');
+check(usage.sessions.every((s) => s.id && s.kind && s.messages > 0), `usage.report lists ${usage.sessions.length} conversation(s)`);
+const t1 = Date.now();
+const again = await rpc(local, 'usage.report', { days: 30, force: true });
+check(again.scanned === 0 && Date.now() - t1 <= Math.max(200, cold), `unchanged transcripts are not rescanned (${again.scanned} rescanned, ${Date.now() - t1}ms warm)`);
+
+// chat: a shell session has no transcript to read, and says so rather than failing
+const chatShell = await rpc(local, 'chat.messages', { session: sess.id });
+check(Array.isArray(chatShell.messages) && chatShell.messages.length === 0 && !!chatShell.error, `chat.messages on a session with no agent transcript: ${chatShell.error}`);
+await rpc(local, 'chat.messages', { kind: 'claude', path: '/etc/passwd' }).then(
+  () => check(false, 'chat.messages refuses a path outside the harness session stores'),
+  (e) => check(/transcript path/.test(e.message), `chat.messages refuses a path outside the harness session stores (${e.message})`));
 const ls = await rpc(local, 'fs.list', { path: '~' });
 check(ls.path === os.homedir(), 'fs.list ~');
 await rpc(local, 'session.remove', { session: sess.id });

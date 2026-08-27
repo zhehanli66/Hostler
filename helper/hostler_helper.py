@@ -15,6 +15,8 @@ Responsibilities
   * CPU / RAM / GPU / VRAM monitoring (nvidia-smi, or Jetson sysfs)
   * activity introspection: Claude Code / Codex / OpenCode transcripts -> status,
     current tool, subagents, token usage
+  * the conversation itself, normalized across the three harnesses, for the chat panel
+  * token spend rolled up per UTC hour, model and conversation (incrementally cached)
 
 Transport: newline-delimited JSON over a unix socket (~/.hostler/helper.sock)
   request : {"id": 1, "op": "session.create", ...params}
@@ -26,10 +28,12 @@ CLI:  hostler_helper.py start | run | stop | status | version | ensure | relay
 from __future__ import print_function
 
 import base64
+import calendar
 import ctypes
 import errno
 import fcntl
 import glob
+import hashlib
 import json
 import os
 import pty
@@ -49,7 +53,7 @@ import traceback
 import uuid
 from collections import OrderedDict, deque
 
-VERSION = "0.1.6"
+VERSION = "0.1.8"
 PROTOCOL = 1
 
 AM_DIR = os.environ.get("HOSTLER_DIR") or os.path.join(os.path.expanduser("~"), ".hostler")
@@ -643,6 +647,77 @@ def summarize_tool_input(name, inp):
     return None
 
 
+CODEX_TOOL_FN = re.compile(r"\btools\.([A-Za-z_]\w*)\s*\(")
+CODEX_PATCH_FILE = re.compile(r"\*\*\* (?:Update|Add|Delete) File: (.+?)(?:\\n|\n|\"|$)")
+# codex writes the same call two ways depending on version — {"cmd":"x"} on one line, or a
+# multi-line JS object literal with bare keys — so keys may or may not be quoted, and a value
+# may be delimited by any of the three JS string quotes.
+CODEX_ARG = re.compile(
+    r"""(?:^|[{,\s])["']?(command|cmd|file_path|path|pattern|query|url|prompt|description)["']?\s*:\s*"""
+    r"""("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|`(?:[^`\\]|\\.)*`)""")
+JS_ESCAPE = {"n": "\n", "t": "\t", "r": "\r", "b": "", "f": ""}
+
+
+def _js_str(lit):
+    """The value of a JS string literal, whichever quote it uses."""
+    if lit[:1] == '"':
+        try:
+            return json.loads(lit)
+        except ValueError:
+            pass
+    body = lit[1:-1] if len(lit) >= 2 else lit
+    return re.sub(r"\\(.)", lambda m: JS_ESCAPE.get(m.group(1), m.group(1)), body)
+
+
+def codex_call_summary(p):
+    """
+    (display name, one-line summary) for a codex tool call.
+
+    Codex' `exec` tool is handed a JS *program* rather than arguments, so the raw input starts
+    with the same `const r = await tools.exec_command({...` boilerplate every time. Dig out the
+    command (or the patched files) instead, and name the row after the call it actually makes.
+    """
+    pt = p.get("type")
+    name = p.get("name") or ("shell" if pt == "local_shell_call" else "tool")
+    if pt == "local_shell_call":
+        return name, truncate(" ".join((p.get("action") or {}).get("command") or []), 160)
+    args = p.get("arguments") if pt == "function_call" else p.get("input")
+    if isinstance(args, dict):
+        return name, summarize_tool_input(name, args)
+    if not isinstance(args, str):
+        return name, None
+    try:
+        return name, summarize_tool_input(name, json.loads(args))
+    except ValueError:
+        pass
+    files = CODEX_PATCH_FILE.findall(args)
+    if files:
+        return "apply_patch", truncate(", ".join(f.strip() for f in files[:4]), 160)
+    m = CODEX_TOOL_FN.search(args)
+    fn = m.group(1) if m else None
+    found = [(k, _js_str(v)) for k, v in CODEX_ARG.findall(args)]
+    flat = lambda s: re.sub(r"\s+", " ", s).strip()
+    cmds = [flat(v) for k, v in found if k in ("cmd", "command") and v.strip()]
+    if cmds:
+        return fn or name, truncate(" ; ".join(cmds), 160)                 # a Promise.all runs several
+    other = next((flat(v) for _, v in found if v.strip()), None)
+    if fn:
+        # the call's own argument, or just the call — never the JS wrapper around it
+        return fn, truncate(other, 160) if other else None
+    return name, truncate(flat(args), 140)
+
+
+def codex_message_text(p):
+    """The text of a codex response_item/message record."""
+    c = p.get("content")
+    if isinstance(c, str):
+        return c.strip()
+    if not isinstance(c, list):
+        return ""
+    return "\n".join(x.get("text") or "" for x in c
+                     if isinstance(x, dict) and x.get("type") in ("output_text", "input_text", "text")).strip()
+
+
 def block_text(block):
     c = block.get("content") if isinstance(block, dict) else block
     if isinstance(c, str):
@@ -905,6 +980,10 @@ class ClaudeIntrospector(object):
     def conversation_title(self):
         return self.main.title
 
+    def transcript_ref(self):
+        self.locate()
+        return {"kind": "claude", "path": self.path, "session_id": self.session_id}
+
     def to_dict(self):
         d = self.main.to_dict()
         d["kind"] = "claude"
@@ -984,9 +1063,9 @@ class CodexConversation(Conversation):
                 if p.get("message"):
                     self.last_text = p["message"]
             elif pt == "user_message":
-                msg = p.get("message") or ""
-                if msg.strip():
-                    self.last_prompt = strip_ide_context(msg)
+                msg = strip_ide_context(p.get("message") or "")
+                if msg.strip() and msg != self.last_prompt:
+                    self.last_prompt = msg
                     self.turns += 1
                 self.last_role = "user"
             elif pt == "exec_command_begin":
@@ -1009,24 +1088,11 @@ class CodexConversation(Conversation):
             pt = p.get("type")
             if pt in ("function_call", "custom_tool_call", "local_shell_call"):
                 cid = p.get("call_id") or p.get("id")
-                name = p.get("name") or ("shell" if pt == "local_shell_call" else "tool")
-                args = p.get("arguments") if pt == "function_call" else p.get("input")
-                summary = None
-                if isinstance(args, str):
-                    try:
-                        j = json.loads(args)
-                        summary = summarize_tool_input(name, j)
-                    except ValueError:
-                        summary = truncate(args.replace("\n", " "), 140)
-                elif isinstance(args, dict):
-                    summary = summarize_tool_input(name, args)
-                if pt == "local_shell_call":
-                    act = p.get("action") or {}
-                    summary = truncate(" ".join(act.get("command") or []), 140)
+                name, summary = codex_call_summary(p)
                 self.pending[cid] = {"name": name, "summary": summary, "ts": ts}
                 self.tool_calls += 1
                 self.last_role = "assistant"
-                if name in ("spawn_agent", "spawn_agents", "spawn_agents_on_csv"):
+                if p.get("name") in ("spawn_agent", "spawn_agents", "spawn_agents_on_csv"):
                     self.subagents[cid] = {"desc": summary, "type": "codex-subagent", "agent_id": None, "ts": ts, "done": False}
             elif pt in ("function_call_output", "custom_tool_call_output", "local_shell_call_output"):
                 self.pending.pop(p.get("call_id"), None)
@@ -1034,10 +1100,16 @@ class CodexConversation(Conversation):
             elif pt == "message":
                 role = p.get("role")
                 if role == "assistant":
-                    txt = "\n".join(x.get("text", "") for x in (p.get("content") or []) if isinstance(x, dict) and x.get("type") in ("output_text", "text"))
-                    if txt.strip():
-                        self.last_text = txt.strip()
+                    txt = codex_message_text(p)
+                    if txt:
+                        self.last_text = txt
                     self.last_role = "assistant"
+                elif role == "user":
+                    txt = strip_ide_context(codex_message_text(p))
+                    if txt and not txt.startswith("<") and txt != self.last_prompt:
+                        self.last_prompt = txt
+                        self.turns += 1
+                        self.last_role = "user"
 
 
 class CodexIntrospector(object):
@@ -1179,6 +1251,10 @@ class CodexIntrospector(object):
     def conversation_title(self):
         return self.title or self.main.title
 
+    def transcript_ref(self):
+        self.locate()
+        return {"kind": "codex", "path": self.path, "session_id": self.session_id}
+
     def to_dict(self):
         d = self.main.to_dict()
         d["kind"] = "codex"
@@ -1307,6 +1383,11 @@ class OpenCodeIntrospector(object):
 
     def conversation_title(self):
         return (self.session or {}).get("title")
+
+    def transcript_ref(self):
+        self.locate()
+        return {"kind": "opencode", "path": getattr(self, "session_path", None),
+                "session_id": (self.session or {}).get("id") or self.session_id}
 
     def to_dict(self):
         now = time.time()
@@ -1971,6 +2052,632 @@ def list_history(cwd, types=None, limit=40):
         e["last_prompt"] = truncate(e.get("last_prompt"), 300)
     out.sort(key=lambda x: x.get("mtime") or 0, reverse=True)
     return out[:limit]
+
+
+# --------------------------------------------------------------------------- chat transcripts
+#
+# The introspectors above keep rolling *state*; the chat panel needs the messages themselves.
+# These read the tail of a transcript and normalize the three harnesses onto one shape
+# ({role, text, thinking, tools[]}) so the UI can render a conversation instead of a raw TUI.
+
+CHAT_TAIL_BYTES = 4 * 1024 * 1024
+CHAT_TEXT_CAP = 24000
+CHAT_OUTPUT_CAP = 2000
+
+
+def _jsonl_tail(path, nbytes=CHAT_TAIL_BYTES):
+    """Objects from the last `nbytes` of a jsonl file; a partial first line is dropped."""
+    try:
+        size = os.path.getsize(path)
+        start = max(0, size - nbytes)
+        with open(path, "rb") as f:
+            f.seek(start)
+            chunk = f.read()
+    except (OSError, IOError):
+        return []
+    lines = chunk.decode("utf-8", "replace").splitlines()
+    if start and lines:
+        lines = lines[1:]
+    out = []
+    for ln in lines:
+        ln = ln.strip()
+        if not ln.startswith("{"):
+            continue
+        try:
+            out.append(json.loads(ln))
+        except ValueError:
+            pass
+    return out
+
+
+def _chat_msg(role, mid, ts, text=None, model=None):
+    return {"id": mid, "role": role, "ts": ts, "text": truncate(text, CHAT_TEXT_CAP) or "",
+            "thinking": "", "model": model, "tools": [], "usage": None}
+
+
+def _chat_append(msg, field, text):
+    if not text:
+        return
+    cur = msg.get(field) or ""
+    msg[field] = truncate((cur + "\n\n" + text).strip() if cur else text.strip(), CHAT_TEXT_CAP)
+
+
+def _chat_claude(path, limit):
+    msgs = []
+    by_tool = {}          # tool_use_id -> the tool entry waiting for its result
+    cur = None            # assistant record group (one message.id is split over several records)
+    for o in _jsonl_tail(path):
+        t = o.get("type")
+        if t not in ("user", "assistant") or o.get("isSidechain"):
+            continue      # subagent traffic has its own panel
+        m = o.get("message") or {}
+        c = m.get("content")
+        ts = o.get("timestamp")
+        if t == "assistant":
+            mid = m.get("id") or o.get("uuid")
+            # records of one message repeat its id; with no id at all, never merge two apart
+            if cur is None or not mid or cur["id"] != mid:
+                cur = _chat_msg("assistant", mid or "a-%d" % len(msgs), ts, model=m.get("model"))
+                msgs.append(cur)
+            cur["ts"] = ts or cur["ts"]
+            u = m.get("usage")
+            if isinstance(u, dict):
+                cur["usage"] = {"input": u.get("input_tokens"), "output": u.get("output_tokens"),
+                                "cache_read": u.get("cache_read_input_tokens"), "cache_write": u.get("cache_creation_input_tokens")}
+            if isinstance(c, str):
+                _chat_append(cur, "text", c)
+            for b in c if isinstance(c, list) else []:
+                if not isinstance(b, dict):
+                    continue
+                bt = b.get("type")
+                if bt == "text":
+                    _chat_append(cur, "text", b.get("text"))
+                elif bt == "thinking":
+                    _chat_append(cur, "thinking", b.get("thinking"))
+                elif bt == "tool_use":
+                    name = b.get("name") or "tool"
+                    tool = {"id": b.get("id"), "name": name, "summary": summarize_tool_input(name, b.get("input") or {}),
+                            "output": None, "status": "running"}
+                    cur["tools"].append(tool)
+                    by_tool[b.get("id")] = tool
+            continue
+        # user record: either a real prompt, or the tool results that close out the last turn
+        results = [b for b in c if isinstance(b, dict) and b.get("type") == "tool_result"] if isinstance(c, list) else []
+        if results:
+            for b in results:
+                tool = by_tool.get(b.get("tool_use_id"))
+                if tool is not None:
+                    tool["output"] = truncate(block_text(b).strip(), CHAT_OUTPUT_CAP)
+                    tool["status"] = "error" if b.get("is_error") else "done"
+            continue
+        cur = None
+        text = _claude_user_text(o)
+        if text:
+            msgs.append(_chat_msg("user", o.get("uuid") or "u-%d" % len(msgs), ts, text))
+    return msgs[-limit:]
+
+
+def _chat_codex(path, limit):
+    msgs = []
+    by_call = {}
+    model = None
+    open_bubble = [None]      # tool calls join the assistant bubble of the turn they belong to
+
+    def assistant_bubble(ts):
+        if open_bubble[0] is None:
+            open_bubble[0] = _chat_msg("assistant", "a-%d" % len(msgs), ts, model=model)
+            msgs.append(open_bubble[0])
+        return open_bubble[0]
+
+    records = _jsonl_tail(path)
+    # Newer codex writes the conversation only as response_item/message; older versions write it
+    # there *and* as event_msg/{user,agent}_message. Take one shape or the other, never both.
+    items = any(o.get("type") == "response_item" and (o.get("payload") or {}).get("type") == "message"
+                and (o.get("payload") or {}).get("role") in ("user", "assistant") for o in records)
+
+    for o in records:
+        t = o.get("type")
+        p = o.get("payload") or {}
+        ts = o.get("timestamp")
+        if t in ("session_meta", "turn_context"):
+            model = p.get("model") or model
+            continue
+        if t == "event_msg":
+            pt = p.get("type")
+            if pt == "task_started":
+                open_bubble[0] = None                 # a new turn never continues the last bubble
+            elif pt == "user_message":
+                text = strip_ide_context(p.get("message") or "")
+                if text and text.strip() and not items:
+                    msgs.append(_chat_msg("user", "u-%d" % len(msgs), ts, text))
+                    open_bubble[0] = None
+            elif pt == "agent_message":
+                if (p.get("message") or "").strip() and not items:
+                    # what codex says next opens a bubble; the tools it then runs join that one
+                    open_bubble[0] = _chat_msg("assistant", "a-%d" % len(msgs), ts, p["message"], model)
+                    msgs.append(open_bubble[0])
+            elif pt == "agent_reasoning":
+                if (p.get("text") or "").strip():
+                    _chat_append(assistant_bubble(ts), "thinking", p["text"])
+            elif pt in ("task_complete", "turn_aborted"):
+                for tool in by_call.values():
+                    if tool["status"] == "running":
+                        tool["status"] = "done"
+                open_bubble[0] = None
+            continue
+        if t == "response_item":
+            pt = p.get("type")
+            if pt == "message":
+                role, txt = p.get("role"), codex_message_text(p)
+                if not txt or role not in ("user", "assistant"):
+                    continue                           # developer/system turns are not the conversation
+                if role == "assistant":
+                    open_bubble[0] = _chat_msg("assistant", "a-%d" % len(msgs), ts, txt, model)
+                    msgs.append(open_bubble[0])
+                elif not txt.startswith("<"):          # <recommended_plugins> and friends are injected
+                    stripped = strip_ide_context(txt)
+                    if stripped:
+                        msgs.append(_chat_msg("user", "u-%d" % len(msgs), ts, stripped))
+                        open_bubble[0] = None
+            elif pt == "reasoning":
+                text = "\n".join(x.get("text") or "" for x in (p.get("summary") or []) if isinstance(x, dict)).strip()
+                if text:
+                    _chat_append(assistant_bubble(ts), "thinking", text)
+            elif pt in ("function_call", "custom_tool_call", "local_shell_call"):
+                name, summary = codex_call_summary(p)
+                tool = {"id": p.get("call_id") or p.get("id"), "name": name, "summary": summary, "output": None, "status": "running"}
+                assistant_bubble(ts)["tools"].append(tool)
+                by_call[tool["id"]] = tool
+            elif pt in ("function_call_output", "custom_tool_call_output", "local_shell_call_output"):
+                tool = by_call.get(p.get("call_id"))
+                if tool is not None:
+                    out = p.get("output")
+                    if isinstance(out, list):
+                        out = "\n".join(x.get("text", "") for x in out if isinstance(x, dict))
+                    elif isinstance(out, dict):
+                        out = out.get("output") or json.dumps(out)[:CHAT_OUTPUT_CAP]
+                    tool["output"] = truncate((out or "").strip(), CHAT_OUTPUT_CAP)
+                    tool["status"] = "done"
+    return msgs[-limit:]
+
+
+def _chat_opencode(session_id, limit):
+    storage = OpenCodeIntrospector.STORAGE
+    msgs = []
+    files = glob.glob(os.path.join(storage, "message", session_id, "*.json"))
+    recs = []
+    for p in files:
+        try:
+            m = json.loads(read_file(p, "{}"))
+        except ValueError:
+            continue
+        if isinstance(m, dict) and m.get("id"):
+            recs.append(m)
+    recs.sort(key=lambda m: ((m.get("time") or {}).get("created") or 0, m.get("id")))
+    for m in recs[-limit:]:
+        t = m.get("time") or {}
+        created = t.get("created")
+        ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(created / 1000.0)) if created else None
+        parts = []
+        for p in glob.glob(os.path.join(storage, "part", m["id"], "*.json")):
+            try:
+                parts.append(json.loads(read_file(p, "{}")))
+            except ValueError:
+                pass
+        parts.sort(key=lambda x: x.get("id") or "")
+        text = "\n".join(x.get("text", "") for x in parts if x.get("type") == "text").strip()
+        msg = _chat_msg("user" if m.get("role") == "user" else "assistant", m["id"], ts, text, m.get("modelID"))
+        if m.get("role") != "user":
+            tk = m.get("tokens") or {}
+            if tk:
+                msg["usage"] = {"input": tk.get("input"), "output": tk.get("output"),
+                                "cache_read": (tk.get("cache") or {}).get("read"), "cache_write": (tk.get("cache") or {}).get("write")}
+            for x in parts:
+                if x.get("type") != "tool":
+                    continue
+                st = x.get("state") or {}
+                msg["tools"].append({"id": x.get("id"), "name": x.get("tool") or "tool",
+                                     "summary": st.get("title") or summarize_tool_input(x.get("tool"), st.get("input")),
+                                     "output": truncate((st.get("output") or "").strip() or None, CHAT_OUTPUT_CAP),
+                                     "status": "running" if st.get("status") in ("running", "pending") else "error" if st.get("status") == "error" else "done"})
+            for x in parts:
+                if x.get("type") == "reasoning" and (x.get("text") or "").strip():
+                    _chat_append(msg, "thinking", x["text"])
+        msgs.append(msg)
+    return msgs
+
+
+def _transcript_path_ok(path):
+    """A caller-supplied transcript path must be a jsonl file under a harness' own session store."""
+    home = os.path.expanduser("~")
+    roots = [os.path.join(home, ".claude", "projects"), os.path.join(home, ".codex", "sessions")]
+    p = os.path.realpath(os.path.expanduser(path or ""))
+    return p.endswith(".jsonl") and any(p.startswith(os.path.realpath(r) + os.sep) for r in roots)
+
+
+def chat_messages(kind, path=None, session_id=None, limit=200):
+    """Normalized conversation for one transcript. `path` for claude/codex, `session_id` for opencode."""
+    limit = max(1, min(int(limit or 200), 1000))
+    if kind == "opencode":
+        if not session_id:
+            return {"kind": kind, "messages": [], "error": "no opencode session"}
+        return {"kind": kind, "session_id": session_id, "messages": _chat_opencode(session_id, limit)}
+    if not path or not os.path.exists(path):
+        return {"kind": kind, "messages": [], "error": "no transcript yet"}
+    fn = _chat_claude if kind == "claude" else _chat_codex if kind == "codex" else None
+    if fn is None:
+        return {"kind": kind, "messages": [], "error": "%s has no transcript to read" % (kind or "this session")}
+    try:
+        mtime = os.path.getsize(path) and os.stat(path).st_mtime
+    except OSError:
+        mtime = None
+    return {"kind": kind, "path": path, "session_id": session_id, "mtime": mtime, "messages": fn(path, limit)}
+
+
+
+# --------------------------------------------------------------------------- token usage
+#
+# Every harness already writes what it spent into its own transcripts; this rolls them up.
+# Buckets are UTC *hours*, not days, so the control plane can re-bucket into the viewer's
+# local days/weeks/months even when machines sit in different timezones. Cost is deliberately
+# not computed here — prices change, and the control plane owns the table (shared/pricing.ts).
+#
+# Claude splits one assistant message over several records that each repeat the *same* usage,
+# so entries carry a (message id, request id) key and the report counts each one once.
+
+USAGE_KINDS = ("claude", "codex", "opencode")
+USAGE_CACHE_VERSION = 3
+USAGE_CACHE_PATH = os.path.join(AM_DIR, "usage-cache.json")
+USAGE_ROLLUP_DAYS = 45        # transcripts older than this can no longer grow: drop their dedupe keys
+USAGE_MAX_FILES = 4000
+USAGE_MIN_INTERVAL = 5        # seconds; a burst of polls reuses the last report
+
+_USAGE = {"lock": threading.Lock(), "cache": None, "at": 0, "report": None, "key": None}
+
+
+def _dedupe_key(*parts):
+    """A short, process-stable key. Stored per entry, so the full ids would bloat the cache."""
+    return hashlib.md5("|".join(p or "" for p in parts).encode("utf-8", "replace")).hexdigest()[:12]
+
+
+def _tk(x):
+    try:
+        return max(0, int(x or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _iso_epoch(s):
+    """Epoch seconds from an ISO-8601 string or an epoch (seconds or milliseconds) number."""
+    if s is None or s == "":
+        return None
+    if isinstance(s, bool):
+        return None
+    if isinstance(s, (int, float)):
+        return s / 1000.0 if s > 1e11 else float(s)
+    m = re.match(r"^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(Z|[+-]\d{2}:?\d{2})?$", str(s).strip())
+    if not m:
+        return None
+    y, mo, d, h, mi, sec = (int(x) for x in m.groups()[:6])
+    try:
+        epoch = calendar.timegm((y, mo, d, h, mi, sec, 0, 1, 0))
+    except (ValueError, OverflowError):
+        return None
+    off = m.group(7)
+    if off and off != "Z":
+        sign = 1 if off[0] == "+" else -1
+        digits = off[1:].replace(":", "")
+        epoch -= sign * (int(digits[:2]) * 3600 + int(digits[2:4]) * 60)
+    return epoch
+
+
+def _hour_key(epoch):
+    return time.strftime("%Y-%m-%dT%H", time.gmtime(epoch))
+
+
+def _usage_scan_claude(path):
+    entries, seen = [], set()
+    meta = {"sid": os.path.basename(path)[:-6], "cwd": None, "title": None}
+    try:
+        f = open(path, "rb")
+    except (OSError, IOError):
+        return entries, meta
+    with f:
+        for raw in f:
+            if b'"usage"' not in raw and b'"aiTitle"' not in raw:
+                continue                                   # cheap reject: transcripts are mostly tool output
+            try:
+                o = json.loads(raw.decode("utf-8", "replace"))
+            except ValueError:
+                continue
+            if not isinstance(o, dict):
+                continue
+            if o.get("type") == "ai-title":
+                meta["title"] = o.get("aiTitle") or meta["title"]
+                continue
+            if o.get("type") != "assistant":
+                continue
+            if not meta["cwd"] and o.get("cwd"):
+                meta["cwd"] = o["cwd"]
+            m = o.get("message") or {}
+            u = m.get("usage")
+            if not isinstance(u, dict):
+                continue
+            model = m.get("model") or "unknown"
+            if model == "<synthetic>":
+                continue                                   # local placeholder turns, not a real request
+            ep = _iso_epoch(o.get("timestamp"))
+            if ep is None:
+                continue
+            # one message is written as several records that each repeat its full usage
+            key = _dedupe_key(m.get("id") or o.get("uuid"), o.get("requestId"))
+            if key in seen:
+                continue
+            seen.add(key)
+            entries.append([_hour_key(ep), model, key,
+                            _tk(u.get("input_tokens")), _tk(u.get("output_tokens")),
+                            _tk(u.get("cache_read_input_tokens")), _tk(u.get("cache_creation_input_tokens")),
+                            _tk((u.get("cache_creation") or {}).get("ephemeral_1h_input_tokens"))])
+    return entries, meta
+
+
+CODEX_TOKEN_FIELDS = ("input_tokens", "cached_input_tokens", "cache_write_input_tokens", "output_tokens")
+
+
+def _codex_spent(u):
+    """How far codex' running counter has got — used only to notice that it restarted."""
+    return _tk(u.get("total_tokens")) or _tk(u.get("input_tokens")) + _tk(u.get("output_tokens"))
+
+
+def _usage_scan_codex(path):
+    entries = []
+    meta = {"sid": None, "cwd": None, "title": None}
+    model = None
+    prev = None
+    try:
+        f = open(path, "rb")
+    except (OSError, IOError):
+        return entries, meta
+    with f:
+        for raw in f:
+            if b'"token_count"' not in raw and b'"session_meta"' not in raw and b'"turn_context"' not in raw:
+                continue
+            try:
+                o = json.loads(raw.decode("utf-8", "replace"))
+            except ValueError:
+                continue
+            if not isinstance(o, dict):
+                continue
+            t, p = o.get("type"), o.get("payload") or {}
+            if t == "session_meta":
+                meta["sid"] = p.get("id") or p.get("session_id") or meta["sid"]
+                meta["cwd"] = p.get("cwd") or meta["cwd"]
+                model = p.get("model") or model
+                continue
+            if t == "turn_context":
+                model = p.get("model") or model
+                meta["cwd"] = p.get("cwd") or meta["cwd"]
+                continue
+            if t != "event_msg" or p.get("type") != "token_count":
+                continue
+            info = p.get("info") or {}
+            total = info.get("total_token_usage") or {}
+            # `total_token_usage` is codex' own running counter and the only trustworthy one:
+            # it repeats the closing token_count of a turn verbatim (which would double-count if
+            # last_token_usage were summed) and it restarts when the thread's context is reset.
+            if total:
+                if prev is None or _codex_spent(total) < _codex_spent(prev):
+                    delta = dict((k, _tk(total.get(k))) for k in CODEX_TOKEN_FIELDS)     # first turn, or a restart
+                else:
+                    delta = dict((k, max(0, _tk(total.get(k)) - _tk(prev.get(k)))) for k in CODEX_TOKEN_FIELDS)
+                prev = total
+            else:
+                delta = info.get("last_token_usage") or {}                               # rollouts without a total
+            if not any(_tk(delta.get(k)) for k in CODEX_TOKEN_FIELDS):
+                continue                                                                 # a repeated event spent nothing
+            ep = _iso_epoch(o.get("timestamp"))
+            if ep is None:
+                continue
+            cached = _tk(delta.get("cached_input_tokens"))
+            # codex counts cached reads inside input_tokens; claude keeps them apart, so split here
+            entries.append([_hour_key(ep), model or "unknown", "",
+                            max(0, _tk(delta.get("input_tokens")) - cached),
+                            _tk(delta.get("output_tokens")), cached, _tk(delta.get("cache_write_input_tokens")), 0])
+    return entries, meta
+
+
+def _usage_scan_opencode(dirpath):
+    entries = []
+    meta = {"sid": os.path.basename(dirpath), "cwd": None, "title": None}
+    for p in glob.glob(os.path.join(dirpath, "*.json")):
+        try:
+            m = json.loads(read_file(p, "{}"))
+        except ValueError:
+            continue
+        if not isinstance(m, dict) or m.get("role") == "user":
+            continue
+        tk = m.get("tokens") or {}
+        if not tk:
+            continue
+        ep = _iso_epoch((m.get("time") or {}).get("created"))
+        if ep is None:
+            continue
+        cache = tk.get("cache") or {}
+        entries.append([_hour_key(ep), m.get("modelID") or "unknown", _dedupe_key(m.get("id")),
+                        _tk(tk.get("input")), _tk(tk.get("output")) + _tk(tk.get("reasoning")),
+                        _tk(cache.get("read")), _tk(cache.get("write")), 0])
+    return entries, meta
+
+
+def _usage_scan(kind, path):
+    if kind == "claude":
+        return _usage_scan_claude(path)
+    if kind == "codex":
+        return _usage_scan_codex(path)
+    return _usage_scan_opencode(path)
+
+
+def _usage_transcripts(kinds):
+    """[(kind, cache_key, path, mtime, size)] for every transcript the report may need."""
+    home = os.path.expanduser("~")
+    out = []
+    if "claude" in kinds:
+        for p in glob.glob(os.path.join(home, ".claude", "projects", "*", "*.jsonl")):
+            try:
+                st = os.stat(p)
+            except OSError:
+                continue
+            out.append(("claude", p, p, st.st_mtime, st.st_size))
+    if "codex" in kinds:
+        for p in glob.glob(os.path.join(home, ".codex", "sessions", "*", "*", "*", "rollout-*.jsonl")):
+            try:
+                st = os.stat(p)
+            except OSError:
+                continue
+            out.append(("codex", p, p, st.st_mtime, st.st_size))
+    if "opencode" in kinds:
+        # a conversation is a directory of message files, and opencode rewrites the last one in
+        # place as it streams — the directory's own mtime would not move, so take the newest file's
+        for d in glob.glob(os.path.join(OpenCodeIntrospector.STORAGE, "message", "*")):
+            if not os.path.isdir(d):
+                continue
+            newest, n = 0, 0
+            try:
+                for e in os.listdir(d):
+                    try:
+                        newest = max(newest, os.stat(os.path.join(d, e)).st_mtime)
+                        n += 1
+                    except OSError:
+                        pass
+            except OSError:
+                continue
+            if n:
+                out.append(("opencode", d, d, newest, n))
+    return out
+
+
+def _usage_rollup(entries):
+    """Merge an immutable transcript's entries per (hour, model) and drop the dedupe keys."""
+    agg = OrderedDict()
+    for e in entries:
+        k = (e[0], e[1])
+        v = agg.get(k)
+        if v is None:
+            agg[k] = [e[0], e[1], "", e[3], e[4], e[5], e[6], e[7]]
+        else:
+            for i in (3, 4, 5, 6, 7):
+                v[i] += e[i]
+    return list(agg.values())
+
+
+def _usage_cache_load():
+    c = _USAGE["cache"]
+    if c is not None:
+        return c
+    try:
+        c = json.loads(read_file(USAGE_CACHE_PATH, "{}"))
+    except ValueError:
+        c = None
+    if not isinstance(c, dict) or c.get("v") != USAGE_CACHE_VERSION or not isinstance(c.get("files"), dict):
+        c = {"v": USAGE_CACHE_VERSION, "files": {}}
+    _USAGE["cache"] = c
+    return c
+
+
+def _usage_cache_save(c):
+    try:
+        if not os.path.isdir(AM_DIR):
+            os.makedirs(AM_DIR)
+        tmp = USAGE_CACHE_PATH + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(c, f, separators=(",", ":"))
+        os.rename(tmp, USAGE_CACHE_PATH)
+    except (OSError, IOError, ValueError) as e:
+        log("usage cache save: %s", e)
+
+
+def usage_report(kinds=None, days=90, force=False, sessions=200):
+    """Token spend per UTC hour, per model and per conversation, across every local transcript."""
+    kinds = tuple(k for k in (kinds or USAGE_KINDS) if k in USAGE_KINDS) or USAGE_KINDS
+    days = max(1, min(int(days or 90), 400))
+    sessions = max(0, min(int(sessions or 0), 1000))
+    now = time.time()
+    key = (kinds, days, sessions)
+    with _USAGE["lock"]:
+        if not force and _USAGE["report"] and _USAGE["key"] == key and now - _USAGE["at"] < USAGE_MIN_INTERVAL:
+            return _USAGE["report"]
+        cache = _usage_cache_load()
+        files = _usage_transcripts(kinds)
+        files.sort(key=lambda x: x[3], reverse=True)
+        truncated = max(0, len(files) - USAGE_MAX_FILES)
+        files = files[:USAGE_MAX_FILES]
+
+        live, scanned, dirty = OrderedDict(), 0, False
+        rollup_before = now - USAGE_ROLLUP_DAYS * 86400
+        for kind, ckey, path, mtime, size in files:
+            rec = cache["files"].get(ckey)
+            if not rec or rec.get("k") != kind or rec.get("m") != mtime or rec.get("s") != size:
+                try:
+                    entries, meta = _usage_scan(kind, path)
+                except (OSError, IOError) as e:
+                    log("usage scan %s: %s", path, e)
+                    continue
+                rec = {"k": kind, "m": mtime, "s": size, "e": entries,
+                       "sid": meta.get("sid"), "cwd": meta.get("cwd"), "title": meta.get("title")}
+                cache["files"][ckey] = rec
+                scanned += 1
+                dirty = True
+            if mtime < rollup_before and any(e[2] for e in rec.get("e") or []):
+                rec["e"] = _usage_rollup(rec["e"])
+                dirty = True
+            live[ckey] = rec
+
+        for ckey, rec in list(cache["files"].items()):
+            if rec.get("k") in kinds and ckey not in live and not os.path.exists(ckey):
+                del cache["files"][ckey]
+                dirty = True
+        if dirty:
+            _usage_cache_save(cache)
+
+        min_hour = _hour_key(now - days * 86400)
+        hours, seen, sess = {}, set(), []
+        for ckey, rec in live.items():
+            kind = rec.get("k") or "unknown"
+            tot = [0, 0, 0, 0, 0]
+            models, first, last, msgs = OrderedDict(), None, None, 0
+            for e in rec.get("e") or []:
+                if len(e) < 8 or e[0] < min_hour:
+                    continue
+                if e[2]:
+                    dk = kind + "|" + e[2]
+                    if dk in seen:
+                        continue
+                    seen.add(dk)
+                slot = hours.setdefault(e[0], {}).setdefault(kind + ":" + (e[1] or "unknown"), [0, 0, 0, 0, 0, 0])
+                for i in range(5):
+                    slot[i] += e[3 + i]
+                    tot[i] += e[3 + i]
+                slot[5] += 1
+                msgs += 1
+                models[e[1]] = models.get(e[1], 0) + e[4]
+                if first is None or e[0] < first:
+                    first = e[0]
+                if last is None or e[0] > last:
+                    last = e[0]
+            if msgs and sessions:
+                sess.append({"kind": kind, "id": rec.get("sid") or os.path.basename(ckey), "path": ckey,
+                             "cwd": rec.get("cwd"), "title": rec.get("title"), "mtime": rec.get("m"),
+                             "model": max(models.items(), key=lambda kv: kv[1])[0] if models else None,
+                             "first": first, "last": last, "messages": msgs,
+                             "input": tot[0], "output": tot[1], "cache_read": tot[2], "cache_write": tot[3],
+                             "cache_write_1h": tot[4]})
+        sess.sort(key=lambda s: s["input"] + s["output"] + s["cache_read"] + s["cache_write"], reverse=True)
+
+        report = {"hours": hours, "sessions": sess[:sessions], "kinds": list(kinds), "days": days,
+                  "files": len(live), "scanned": scanned, "truncated": truncated, "host": HOSTNAME,
+                  "generated": now, "took": round(time.time() - now, 3)}
+        _USAGE["report"], _USAGE["at"], _USAGE["key"] = report, now, key
+        return report
 
 
 # --------------------------------------------------------------------------- sessions
@@ -3100,6 +3807,20 @@ class Server(object):
             return self.monitor.rescan_tools()
         if op == "history.list":
             return list_history(req.get("cwd"), req.get("types"), req.get("limit") or 40)
+        if op == "chat.messages":
+            kind, path, sid = req.get("kind"), req.get("path"), req.get("session_id")
+            if req.get("session"):
+                s = sm.get(req["session"])
+                ref = s.introspector.transcript_ref() if s.introspector else None
+                if not ref:
+                    return {"kind": s.spec.get("type"), "messages": [], "error": "this session has no agent transcript"}
+                kind, path, sid = ref["kind"], ref["path"], ref["session_id"]
+            elif path and not _transcript_path_ok(path):
+                raise ValueError("not a transcript path")
+            return chat_messages(kind, path, sid, req.get("limit") or 200)
+        if op == "usage.report":
+            return usage_report(req.get("kinds"), req.get("days") or 90, bool(req.get("force")),
+                                200 if req.get("sessions") is None else req.get("sessions"))
         if op == "git.status":
             return git_status(os.path.expanduser(req.get("cwd") or "~"))
         if op == "git.diff":

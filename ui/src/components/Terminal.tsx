@@ -127,6 +127,10 @@ export function TerminalView({ machineId, sessionId, kind, readOnly }: { machine
 
   return (
     <>
+      <div className="term-wrap" style={{ background: termTheme.background }}>
+        <div ref={ref} style={{ height: '100%' }} />
+        {err && <div className="term-notice">{err}</div>}
+      </div>
       <div className="term-bar">
         <span>send input</span>
         <input value={line} placeholder="type a line and press Enter (sent with \n) — or click into the terminal and type directly" onChange={(e) => setLine(e.target.value)}
@@ -141,10 +145,6 @@ export function TerminalView({ machineId, sessionId, kind, readOnly }: { machine
         <button className="btn sm ghost" title="Smaller text" onClick={() => setFontSize((f) => Math.max(9, f - 1))}>A−</button>
         <button className="btn sm ghost" title="Larger text" onClick={() => setFontSize((f) => Math.min(24, f + 1))}>A+</button>
         <button className="btn sm ghost" onClick={() => termRef.current?.clear()}>clear</button>
-      </div>
-      <div className="term-wrap" style={{ background: termTheme.background }}>
-        <div ref={ref} style={{ height: '100%' }} />
-        {err && <div className="term-notice">{err}</div>}
       </div>
     </>
   );

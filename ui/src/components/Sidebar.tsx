@@ -7,7 +7,7 @@ import { Icon, TypeAvatar } from './icons';
 import { cycleThemePref, themePref, useTheme } from '../theme';
 
 export function Sidebar({ state, sel }: { state: AppState; sel: Selection }) {
-  const { openModal } = useContext(AppCtx);
+  const { openModal, select } = useContext(AppCtx);
   const live = state.machines.reduce((a, m) => a + m.sessions.filter((s) => s.status === 'running' || s.status === 'adopted').length, 0);
   useTheme();
   const tp = themePref();
@@ -18,6 +18,12 @@ export function Sidebar({ state, sel }: { state: AppState; sel: Selection }) {
         <div className="title">Hostler</div>
         <button className="btn ghost sm icon" title={`theme: ${tp} (click to change)`} onClick={cycleThemePref}><Icon name={tp === 'system' ? 'monitor' : tp === 'light' ? 'sun' : 'moon'} size={14} /></button>
         <div className={classNames('conn', api.connected && 'on')} title={api.connected ? 'connected to control plane' : 'control plane offline'} />
+      </div>
+      <div className="nav">
+        <div className={classNames('tree-row', sel?.view === 'usage' && 'selected')} onClick={() => select({ view: 'usage' })}>
+          <span className="caret"><Icon name="zap" size={13} /></span>
+          <span className="name">Usage</span>
+        </div>
       </div>
       <div className="side-section">
         Machines <span className="spacer" />
@@ -30,7 +36,7 @@ export function Sidebar({ state, sel }: { state: AppState; sel: Selection }) {
       <div className="side-foot">
         <Icon name="activity" size={13} /> {live} agent{live === 1 ? '' : 's'} live · {state.machines.filter((m) => m.status === 'connected').length}/{state.machines.length} machines
         <span style={{ flex: 1 }} />
-        {sel && <button className="btn sm primary" onClick={() => openModal({ type: 'newAgent', machineId: sel.machineId, cwd: sel.workspace })}><Icon name="plus" size={13} /> Agent</button>}
+        {sel?.machineId && <button className="btn sm primary" onClick={() => openModal({ type: 'newAgent', machineId: sel.machineId!, cwd: sel.workspace })}><Icon name="plus" size={13} /> Agent</button>}
       </div>
     </aside>
   );

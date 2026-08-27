@@ -715,14 +715,55 @@ class ClaudeConversation(Conversation):
                     self.last_role = "user"
 
 
+class TranscriptClaims(object):
+    """A transcript belongs to exactly one session.
+
+    Two agents of the same kind in the same directory would otherwise both latch onto the
+    newest transcript there and report each other's conversation. Keys are whatever
+    identifies a conversation for that agent (a file path for Claude Code, the thread id
+    for Codex / OpenCode); a session may reserve its key before the file even exists.
+    """
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.owner = {}
+
+    def claim(self, key, owner):
+        """Take `key` for `owner`; True if it is now ours (or already was)."""
+        if not key or not owner:
+            return True
+        with self.lock:
+            cur = self.owner.setdefault(key, owner)
+            return cur == owner
+
+    def taken(self, key, owner):
+        """True when another session owns `key`."""
+        if not key or not owner:
+            return False
+        with self.lock:
+            cur = self.owner.get(key)
+            return cur is not None and cur != owner
+
+    def release(self, owner):
+        with self.lock:
+            for k in [k for k, o in self.owner.items() if o == owner]:
+                del self.owner[k]
+
+
+CLAIMS = TranscriptClaims()
+
+
 class ClaudeIntrospector(object):
     """Follows ~/.claude/projects/<cwd>/<session>.jsonl and its subagents."""
 
-    def __init__(self, cwd, session_id=None, started=None):
+    def __init__(self, cwd, session_id=None, started=None, owner=None):
         self.cwd = cwd
         self.session_id = session_id
         self.started = started or 0
+        self.owner = owner
         self.proj_dir = os.path.join(os.path.expanduser("~"), ".claude", "projects", encode_claude_project(cwd))
+        if session_id:
+            CLAIMS.claim(os.path.join(self.proj_dir, session_id + ".jsonl"), owner)   # reserve before it exists
         self.path = None
         self.tail = None
         self.main = ClaudeConversation()
@@ -741,11 +782,13 @@ class ClaudeIntrospector(object):
         self.last_locate = now
         if self.session_id:
             p = os.path.join(self.proj_dir, self.session_id + ".jsonl")
-            if os.path.exists(p):
+            if os.path.exists(p) and CLAIMS.claim(p, self.owner):
                 self.path = p
         else:
             best = None
             for p in glob.glob(os.path.join(self.proj_dir, "*.jsonl")):
+                if CLAIMS.taken(p, self.owner):        # another session already follows it
+                    continue
                 try:
                     mt = os.stat(p).st_mtime
                 except OSError:
@@ -754,7 +797,7 @@ class ClaudeIntrospector(object):
                     continue
                 if best is None or mt > best[0]:
                     best = (mt, p)
-            if best:
+            if best and CLAIMS.claim(best[1], self.owner):
                 self.path = best[1]
                 self.session_id = os.path.basename(best[1])[:-6]
         if self.path:
@@ -792,6 +835,9 @@ class ClaudeIntrospector(object):
         for aid, (tail, conv, meta) in self.sub_tails.items():
             for o in tail.read():
                 conv.feed(o)
+
+    def conversation_title(self):
+        return self.main.title
 
     def to_dict(self):
         d = self.main.to_dict()
@@ -931,10 +977,12 @@ class CodexConversation(Conversation):
 class CodexIntrospector(object):
     SESS_DIR = os.path.join(os.path.expanduser("~"), ".codex", "sessions")
 
-    def __init__(self, cwd, started=None, session_id=None):
+    def __init__(self, cwd, started=None, session_id=None, owner=None):
         self.cwd = cwd
         self.started = started or 0
         self.session_id = session_id
+        self.owner = owner
+        CLAIMS.claim(session_id, owner)        # a resumed thread is ours before its rollout is touched
         self.path = None
         self.tail = None
         self.main = CodexConversation()
@@ -1006,6 +1054,10 @@ class CodexIntrospector(object):
                 continue
             if os.path.normpath(meta.get("cwd") or "") != os.path.normpath(self.cwd):
                 continue
+            if CLAIMS.taken(meta.get("id"), self.owner):   # another session already follows that thread
+                continue
+            if not CLAIMS.claim(meta.get("id"), self.owner):
+                continue
             self.path = p
             self.session_id = meta.get("id")
             break
@@ -1058,6 +1110,9 @@ class CodexIntrospector(object):
         except OSError:
             pass
 
+    def conversation_title(self):
+        return self.title or self.main.title
+
     def to_dict(self):
         d = self.main.to_dict()
         d["kind"] = "codex"
@@ -1085,10 +1140,12 @@ class OpenCodeIntrospector(object):
     """Best-effort reader of ~/.local/share/opencode/storage (session / message / part JSON files)."""
     STORAGE = os.path.join(os.path.expanduser("~"), ".local", "share", "opencode", "storage")
 
-    def __init__(self, cwd, started=None, session_id=None):
+    def __init__(self, cwd, started=None, owner=None, session_id=None):
         self.cwd = cwd
         self.started = started or 0
+        self.owner = owner
         self.session_id = session_id
+        CLAIMS.claim(session_id, owner)
         self.session = None
         self.last_locate = 0
         self.last_poll = 0
@@ -1127,9 +1184,11 @@ class OpenCodeIntrospector(object):
                 continue
             if os.path.normpath(s.get("directory") or "") != os.path.normpath(self.cwd):
                 continue
+            if CLAIMS.taken(s.get("id"), self.owner):      # another session already follows it
+                continue
             if best is None or mt > best[0]:
                 best = (mt, s, p)
-        if best:
+        if best and CLAIMS.claim(best[1].get("id"), self.owner):
             self.session = best[1]
             self.session_path = best[2]
         return bool(self.session)
@@ -1179,6 +1238,9 @@ class OpenCodeIntrospector(object):
 
     def poll(self):
         pass
+
+    def conversation_title(self):
+        return (self.session or {}).get("title")
 
     def to_dict(self):
         now = time.time()
@@ -1231,13 +1293,13 @@ def probe_tools():
     return tools
 
 
-def make_introspector(kind, cwd, started=None, session_id=None):
+def make_introspector(kind, cwd, started=None, session_id=None, owner=None):
     if kind == "claude":
-        return ClaudeIntrospector(cwd, session_id=session_id, started=started)
+        return ClaudeIntrospector(cwd, session_id=session_id, started=started, owner=owner)
     if kind == "codex":
-        return CodexIntrospector(cwd, started=started, session_id=session_id)
+        return CodexIntrospector(cwd, started=started, session_id=session_id, owner=owner)
     if kind == "opencode":
-        return OpenCodeIntrospector(cwd, started=started, session_id=session_id)
+        return OpenCodeIntrospector(cwd, started=started, owner=owner, session_id=session_id)
     return None
 
 
@@ -1472,7 +1534,8 @@ class Session(object):
     def __init__(self, sid, spec):
         self.id = sid
         self.spec = spec                          # creation params (for restart)
-        self.name = spec.get("name") or sid
+        self.name = (spec.get("name") or "").strip() or default_session_name(spec)
+        self.auto_name = not (spec.get("name") or "").strip()   # follow the agent's own conversation title
         self.type = spec.get("type") or "shell"   # claude | codex | opencode | shell | custom
         self.cwd = spec.get("cwd") or os.path.expanduser("~")
         self.workspace = spec.get("workspace") or self.cwd
@@ -1555,6 +1618,15 @@ class Session(object):
         return d
 
 
+TYPE_LABELS = {"claude": "Claude Code", "codex": "Codex", "opencode": "OpenCode", "shell": "Shell", "custom": "Command"}
+
+
+def default_session_name(spec):
+    cwd = spec.get("cwd") or "~"
+    base = os.path.basename(os.path.normpath(os.path.expanduser(cwd))) or "/"
+    return "%s in %s" % (TYPE_LABELS.get(spec.get("type") or "shell", "Agent"), base)
+
+
 def build_argv(spec):
     """Turn a session spec into (argv, display, meta)."""
     kind = spec.get("type") or "shell"
@@ -1572,6 +1644,7 @@ def build_argv(spec):
         else:
             cmd = "%s --session-id %s %s" % (claude, shlex.quote(sid), extra)
     elif kind == "codex":
+        rs = spec.get("resume_id")
         codex = agent_binary("codex")
         if spec.get("resume") and rs:
             meta["session_id"] = rs        # `codex resume` keeps writing the same rollout
@@ -1645,7 +1718,7 @@ class SessionManager(object):
         if not s.spec.get("cwd"):
             s.cwd = proc_cwd(s.adopted_pid) or s.cwd
             s.workspace = s.spec.get("workspace") or s.cwd
-        s.introspector = make_introspector(s.type, s.cwd, started=s.started, session_id=s.meta.get("session_id"))
+        s.introspector = make_introspector(s.type, s.cwd, started=s.started, owner=s.id, session_id=s.meta.get("session_id"))
 
     def _spawn(self, s):
         argv, display, meta = build_argv(s.spec)
@@ -1687,7 +1760,9 @@ class SessionManager(object):
         header = ("\r\n\x1b[2m[hostler] session %s started %s in %s: %s\x1b[0m\r\n" % (s.id, time.strftime("%Y-%m-%d %H:%M:%S"), cwd, display)).encode()
         s.buffer.append(header)
         s.write_log(header)
-        s.introspector = make_introspector(s.type, s.cwd, started=s.started, session_id=s.meta.get("claude_session_id") or s.meta.get("session_id"))
+        CLAIMS.release(s.id)
+        s.introspector = make_introspector(s.type, s.cwd, started=s.started, owner=s.id,
+                                           session_id=s.meta.get("claude_session_id") or s.meta.get("session_id"))
         os.write(self.wake_w, b"x")
 
     @staticmethod
@@ -1811,6 +1886,7 @@ class SessionManager(object):
             self.signal(sid, "KILL", tree=True)
         with self.lock:
             self.sessions.pop(sid, None)
+        CLAIMS.release(sid)
         if s.fd is not None:
             try:
                 os.close(s.fd)
@@ -1968,6 +2044,7 @@ class SessionManager(object):
                     self.create(spec)
                 elif not d.get("adopted"):
                     s = Session(d["id"], spec)
+                    s.name = d.get("name") or s.name
                     s.command_display = d.get("command")
                     s.status = "lost" if d.get("status") == "running" else "exited"
                     s.exit_code = d.get("exit_code")
@@ -2076,6 +2153,15 @@ class Monitor(object):
                     s.introspector.poll()
                 except Exception:
                     log("introspector poll failed for %s: %s", s.id, traceback.format_exc())
+                if s.auto_name:
+                    # the agent titles the conversation a turn or two in; adopt it as the session name
+                    try:
+                        title = truncate((s.introspector.conversation_title() or "").strip(), 80)
+                    except Exception:
+                        title = None
+                    if title and title != s.name:
+                        s.name = title
+                        self.sm.save_registry()
             if s.adopted and s.status == "adopted" and (s.adopted_pid not in procs):
                 s.status = "exited"
                 s.ended = time.time()
@@ -2452,6 +2538,8 @@ class Server(object):
         if op == "session.rename":
             s = sm.get(req["session"])
             s.name = (req.get("name") or s.name).strip()[:80]
+            s.auto_name = False
+            s.spec["name"] = s.name
             sm.save_registry()
             return s.to_dict(with_activity=False)
         if op == "session.logs":

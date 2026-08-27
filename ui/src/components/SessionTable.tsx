@@ -31,7 +31,7 @@ function SessionRow({ m, s, home, onOpen, showDirectory }: { m: MachineState; s:
   return (
     <tr className="clickable" onClick={onOpen}>
       <td style={{ width: 20 }}><span className={classNames('dot', sessionTone(s))} /></td>
-      <td><span className="name-cell"><TypeAvatar type={s.type} size={26} /><span style={{ minWidth: 0 }}><span className="t">{s.name}</span><span className="s">{s.activity?.title || TYPE_LABEL[s.type] || s.type}</span></span></span></td>
+      <td><span className="name-cell"><TypeAvatar type={s.type} size={26} /><span style={{ minWidth: 0 }}><span className="t">{s.name}</span><span className="s">{s.activity?.title && s.activity.title !== s.name ? s.activity.title : TYPE_LABEL[s.type] || s.type}</span></span></span></td>
       <td className="nowrap"><span className={classNames('badge', s.type)}>{TYPE_LABEL[s.type] || s.type}</span>{s.adopted && <span className="badge muted" style={{ marginLeft: 4 }}>adopted</span>}</td>
       {showDirectory && <td className="mono trunc" style={{ maxWidth: 200 }} title={s.cwd}>{shortPath(s.cwd, home)}</td>}
       <td className="trunc" style={{ maxWidth: 260 }} title={act.detail}>

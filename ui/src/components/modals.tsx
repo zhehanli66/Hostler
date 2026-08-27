@@ -67,7 +67,7 @@ function MachineFields({ f, set, hosts }: { f: MachineForm; set: (p: Partial<Mac
             <div className="field"><label>Remote python</label><input value={f.pythonPath} placeholder="python3 (auto-detected)" onChange={(e) => set({ pythonPath: e.target.value })} /></div>
           </div>
           <div className="field row"><input type="checkbox" id="savepw" disabled={!canSave} checked={f.savePassword && canSave} onChange={(e) => set({ savePassword: e.target.checked })} />
-            <label htmlFor="savepw">{caps.secretStorage === 'keychain' ? 'Remember password (encrypted with the OS keychain)' : caps.secretStorage === 'basic' ? 'Remember password (Electron basic encryption — no system keyring found, weak)' : 'Remember password — needs the desktop app (OS keychain); in browser mode the password is kept in memory only'}</label></div>
+            <label htmlFor="savepw">{caps.secretStorage === 'keychain' ? 'Remember password (encrypted with the OS keychain)' : caps.desktop ? 'Remember password — unavailable: no OS keyring found (libsecret / kwallet); the password is kept in memory for this session only' : 'Remember password — needs the desktop app (OS keychain); in browser mode the password is kept in memory only'}</label></div>
           <div className="field"><div className="hint">Tip: after the first password login, use “Set up key login” on the machine page to install your public key and stop using the password altogether.</div></div>
         </>
       )}

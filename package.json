@@ -1,7 +1,7 @@
 {
   "name": "hostler",
   "version": "0.1.0",
-  "description": "Hostler \u2014 SSH control center for native coding agents (Claude Code, Codex, OpenCode)",
+  "description": "Hostler — SSH control center for native coding agents (Claude Code, Codex, OpenCode)",
   "private": true,
   "main": "dist/electron/main.js",
   "type": "commonjs",
@@ -45,7 +45,7 @@
     "@xterm/xterm": "^5.5.0",
     "concurrently": "^9.0.0",
     "cross-env": "^7.0.3",
-    "electron": "^33.0.0",
+    "electron": "^44.0.0",
     "electron-builder": "^26.15.3",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",

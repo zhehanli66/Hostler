@@ -202,10 +202,11 @@ export interface MachineState {
   hasPassword?: boolean;
 }
 
-export type SecretBackend = 'keychain' | 'basic' | 'none';
+/** 'keychain' = OS keychain via Electron safeStorage; 'none' = browser mode or no usable keyring (passwords stay in memory) */
+export type SecretBackend = 'keychain' | 'none';
 
 export interface AppCapabilities {
-  /** how saved passwords are protected: OS keychain, Electron basic (obfuscation only), or not available (browser mode) */
+  /** how saved passwords are protected: OS keychain, or not available (browser mode / no keyring) */
   secretStorage: SecretBackend;
   desktop: boolean;
 }

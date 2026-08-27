@@ -125,8 +125,8 @@ function PasswordPrompt({ m }: { m: MachineState }) {
       <div style={{ flex: 1, minWidth: 220 }}><b>Password needed</b> for {m.config.user ? m.config.user + '@' : ''}{m.config.host}{m.error && !/password is needed/.test(m.error) ? ` — ${m.error}` : ''}</div>
       <input type="password" autoFocus value={pw} placeholder="SSH password" onChange={(e) => setPw(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') submit(); }}
         style={{ background: 'var(--bg)', border: '1px solid var(--border-2)', borderRadius: 8, height: 30, padding: '0 10px', color: 'var(--fg)', width: 200 }} />
-      <label className="row-flex small" title={canRemember ? (caps.secretStorage === 'keychain' ? 'stored encrypted with the OS keychain' : 'stored with Electron basic encryption (no system keyring found — weak)') : 'saving passwords needs the desktop app (OS keychain); in browser mode it stays in memory'} style={{ color: 'var(--fg-2)' }}>
-        <input type="checkbox" disabled={!canRemember} checked={remember && canRemember} onChange={(e) => setRemember(e.target.checked)} /> remember{caps.secretStorage === 'keychain' ? ' (keychain)' : caps.secretStorage === 'basic' ? ' (basic)' : ''}
+      <label className="row-flex small" title={canRemember ? 'stored encrypted with the OS keychain' : caps.desktop ? 'no OS keyring found (libsecret / kwallet) — the password stays in memory for this session' : 'saving passwords needs the desktop app (OS keychain); in browser mode it stays in memory'} style={{ color: 'var(--fg-2)' }}>
+        <input type="checkbox" disabled={!canRemember} checked={remember && canRemember} onChange={(e) => setRemember(e.target.checked)} /> remember{canRemember ? ' (keychain)' : ''}
       </label>
       <button className="btn primary sm" disabled={busy || !pw} onClick={submit}><Icon name="link" size={13} /> Connect</button>
     </div>

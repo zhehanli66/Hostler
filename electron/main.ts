@@ -8,12 +8,17 @@ let win: BrowserWindow | null = null;
 // keep Electron's own profile data (caches, cookies…) out of the Hostler config dir
 app.setPath('userData', path.join(app.getPath('appData'), 'hostler', 'electron'));
 
-/** Secrets at rest go through the OS keychain (macOS Keychain / Windows DPAPI / Linux libsecret or kwallet). */
+/**
+ * Secrets at rest go through the OS keychain (macOS Keychain / Windows DPAPI / Linux libsecret or kwallet).
+ * On Linux without a keyring Electron falls back to "basic_text", which is obfuscation rather than encryption —
+ * in that case remembering passwords is disabled entirely (they stay in memory for the session).
+ */
 function secretCodec() {
   if (!safeStorage.isEncryptionAvailable()) return null;
   const backendName = typeof (safeStorage as any).getSelectedStorageBackend === 'function' ? (safeStorage as any).getSelectedStorageBackend() : 'os';
+  if (backendName === 'basic_text' || backendName === 'unknown') return null;
   return {
-    backend: backendName === 'basic_text' ? ('basic' as const) : ('keychain' as const),
+    backend: 'keychain' as const,
     encrypt: (plain: string) => safeStorage.encryptString(plain).toString('base64'),
     decrypt: (enc: string) => safeStorage.decryptString(Buffer.from(enc, 'base64')),
   };

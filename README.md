@@ -93,7 +93,10 @@ Prebuilt desktop packages are produced by the release workflow for macOS, Linux 
 
 - Key-based SSH is the default path: ssh-agent, `IdentityFile` from `~/.ssh/config`, or the usual `~/.ssh/id_*` keys.
 - Password logins are kept **in memory** only. The desktop app can *remember* a password encrypted with the OS keychain
-  (Electron `safeStorage`); plain-text passwords are never written to disk, never sent to the UI, never sent to a helper.
+  (Electron `safeStorage`: macOS Keychain, Windows DPAPI, Linux libsecret/kwallet). On Linux without a keyring Electron
+  would fall back to `basic_text`, which is obfuscation rather than encryption — Hostler refuses to save passwords in that
+  case (and in browser mode), so plain-text or weakly protected passwords are never written to disk. Passwords are never
+  sent to the UI or to a helper.
 - After a password login, **Set up key login** installs your public key on the machine (like `ssh-copy-id`, generating an
   ed25519 key if you have none), verifies key auth and forgets the password.
 - The control plane binds `127.0.0.1` and requires a token; host keys are pinned on first use. See [SECURITY.md](SECURITY.md).

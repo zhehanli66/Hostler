@@ -133,7 +133,50 @@ def which(cmd):
     for p in candidates:
         if os.path.isfile(p) and os.access(p, os.X_OK):
             return p
-    return None
+    return bundled_agent_bin(cmd)
+
+
+# Agent CLIs that ship *inside* an IDE extension instead of on PATH: someone who only ever
+# used Claude Code / Codex through the VS Code (or Cursor / Windsurf) extension has a perfectly
+# good binary on the machine, just not one `command -v` can see.
+IDE_EXT_DIRS = ["~/.vscode/extensions", "~/.vscode-insiders/extensions", "~/.vscode-server/extensions",
+                "~/.vscode-server-insiders/extensions", "~/.vscodium/extensions", "~/.cursor/extensions",
+                "~/.cursor-server/extensions", "~/.windsurf/extensions", "~/.windsurf-server/extensions"]
+BUNDLED_AGENTS = {
+    "claude": ["anthropic.claude-code-*/resources/native-binary/claude", "anthropic.claude-code-*/resources/native/claude",
+               "anthropic.claude-code-*/resources/claude", "anthropic.claude-code-*/bin/claude"],
+    "codex": ["openai.chatgpt-*/bin/*/codex", "openai.chatgpt-*/binaries/*/codex", "openai.chatgpt-*/bin/codex"],
+    "opencode": ["*opencode*/bin/*/opencode", "*opencode*/bin/opencode"],
+}
+
+
+def bundled_agent_bin(cmd):
+    """Newest IDE-bundled build of an agent CLI, or None."""
+    hits = []
+    for d in IDE_EXT_DIRS:
+        base = os.path.expanduser(d)
+        for pat in BUNDLED_AGENTS.get(cmd, []):
+            for p in glob.glob(os.path.join(base, pat)):
+                if os.path.isfile(p) and os.access(p, os.X_OK):
+                    try:
+                        hits.append((os.stat(p).st_mtime, p))
+                    except OSError:
+                        pass
+    hits.sort(reverse=True)            # the extension the IDE updated last
+    return hits[0][1] if hits else None
+
+
+AGENT_BINS = {}
+
+
+def agent_binary(kind):
+    """How to invoke an agent: its plain name is useless when the CLI only exists inside an
+    IDE extension, so launch whatever `which()` (PATH, user dirs, login shell, IDE) resolved."""
+    p = AGENT_BINS.get(kind)
+    if not p or not os.path.exists(p):
+        p = which(kind)
+        AGENT_BINS[kind] = p
+    return shlex.quote(p) if p else kind
 
 
 def run_cmd(argv, timeout=5, cwd=None):
@@ -1140,6 +1183,28 @@ class OpenCodeIntrospector(object):
         return self.cache
 
 
+TOOL_NAMES = ("claude", "codex", "opencode", "tmux", "git", "curl", "npm", "nvidia-smi", "python3")
+
+
+def probe_tools():
+    """Locate the CLIs Hostler cares about: PATH, common user dirs, a login shell, IDE bundles."""
+    tools = {}
+    for t in TOOL_NAMES:
+        tools[t] = which(t)
+    # a login shell finds agents installed through nvm / asdf / custom rc files
+    missing = [t for t in ("claude", "codex", "opencode") if not tools[t]]
+    if missing:
+        shell = os.environ.get("SHELL") or "/bin/bash"
+        rc, out, _ = run_cmd([shell, "-lic", "for t in %s; do printf '%%s=%%s\\n' $t \"$(command -v $t)\"; done" % " ".join(missing)], timeout=8)
+        for line in out.splitlines():
+            k, _, v = line.partition("=")
+            if k in tools and v.strip():
+                tools[k] = v.strip()
+    for t in ("claude", "codex", "opencode"):
+        AGENT_BINS[t] = tools[t]
+    return tools
+
+
 def make_introspector(kind, cwd, started=None, session_id=None):
     if kind == "claude":
         return ClaudeIntrospector(cwd, session_id=session_id, started=started)
@@ -1267,15 +1332,17 @@ def build_argv(spec):
     if kind == "claude":
         sid = spec.get("claude_session_id") or (spec.get("meta") or {}).get("claude_session_id") or str(uuid.uuid4())
         meta["claude_session_id"] = sid
+        claude = agent_binary("claude")
         if spec.get("resume"):
-            cmd = "claude --resume %s %s" % (shlex.quote(sid), extra)
+            cmd = "%s --resume %s %s" % (claude, shlex.quote(sid), extra)
         else:
-            cmd = "claude --session-id %s %s" % (shlex.quote(sid), extra)
+            cmd = "%s --session-id %s %s" % (claude, shlex.quote(sid), extra)
     elif kind == "codex":
+        codex = agent_binary("codex")
         rs = spec.get("resume_id")
-        cmd = ("codex resume %s %s" % (shlex.quote(rs), extra)) if (spec.get("resume") and rs) else ("codex %s" % extra)
+        cmd = ("%s resume %s %s" % (codex, shlex.quote(rs), extra)) if (spec.get("resume") and rs) else ("%s %s" % (codex, extra))
     elif kind == "opencode":
-        cmd = "opencode %s" % extra
+        cmd = "%s %s" % (agent_binary("opencode"), extra)
     elif kind == "shell":
         cmd = None
     else:
@@ -1716,18 +1783,7 @@ class Monitor(object):
             user = pwd.getpwuid(os.getuid()).pw_name
         except Exception:
             user = os.environ.get("USER", "?")
-        tools = {}
-        for t in ("claude", "codex", "opencode", "tmux", "git", "nvidia-smi", "python3"):
-            tools[t] = which(t)
-        # try a login shell for agents installed via nvm etc.
-        missing = [t for t in ("claude", "codex", "opencode") if not tools[t]]
-        if missing:
-            shell = os.environ.get("SHELL") or "/bin/bash"
-            rc, out, _ = run_cmd([shell, "-lic", "for t in %s; do printf '%%s=%%s\\n' $t \"$(command -v $t)\"; done" % " ".join(missing)], timeout=8)
-            for line in out.splitlines():
-                k, _, v = line.partition("=")
-                if k in tools and v.strip():
-                    tools[k] = v.strip()
+        tools = probe_tools()
         os_name = None
         for line in (read_file("/etc/os-release") or "").splitlines():
             if line.startswith("PRETTY_NAME="):
@@ -1739,6 +1795,12 @@ class Monitor(object):
             "gpu_kind": self.res.gpu_kind if hasattr(self.res, "gpu_kind") else ("nvidia" if self.res.nvidia_smi else ("jetson" if self.res.jetson else None)),
             "sock": SOCK_PATH, "started": time.time(),
         }
+
+    def rescan_tools(self):
+        """Re-probe the CLIs (an install finished; no need to reconnect the machine)."""
+        tools = probe_tools()
+        self.hello["tools"] = tools
+        return tools
 
     def start(self):
         self.thread.start()
@@ -2195,6 +2257,8 @@ class Server(object):
             return self.monitor.discovered
         if op == "resources":
             return self.monitor.res.sample_system()
+        if op == "tools.rescan":
+            return self.monitor.rescan_tools()
         if op == "git.status":
             return git_status(os.path.expanduser(req.get("cwd") or "~"))
         if op == "git.diff":

@@ -110,6 +110,18 @@ check(d["status"] == "tool" and d["current_tool"]["name"] == "bash" and d["curre
 check(d["model"] == "model-z" and d["last_prompt"] == "Refactor the auth module", "opencode: model and prompt")
 check(len(d["subagents"]) == 1 and d["subagents"][0]["id"] == "ses_2", "opencode: child session via parentID")
 
+# ----------------------------------------------------------------- CLIs bundled in an IDE extension
+ext = os.path.join(HOME, ".vscode", "extensions", "anthropic.claude-code-9.9.9-linux-x64", "resources", "native-binary")
+os.makedirs(ext)
+binp = os.path.join(ext, "claude")
+with open(binp, "w") as f:
+    f.write("#!/bin/sh\n")
+os.chmod(binp, 0o755)
+check(H.bundled_agent_bin("claude") == binp, "agent CLI bundled in a VS Code extension is discovered")
+H.AGENT_BINS["claude"] = binp
+check(H.build_argv({"type": "claude", "cwd": cwd})[1].startswith(binp + " --session-id "), "a session launches the resolved binary, not the bare name")
+H.AGENT_BINS.pop("claude", None)
+
 # ----------------------------------------------------------------- helpers
 check(H.classify_agent(["node", "/x/node_modules/@anthropic-ai/claude-code/cli.js", "--resume"])[0] == "claude", "classify: claude cli.js")
 check(H.classify_agent(["/home/u/.local/bin/codex", "-c", "x", "app-server"])[0] == "codex", "classify: codex")

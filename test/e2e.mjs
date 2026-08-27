@@ -61,6 +61,8 @@ const logs = await rpc(local, 'session.logs', { session: sess.id });
 check(Buffer.from(logs.data, 'base64').toString().includes('E2E_HELLO'), 'logs via rpc');
 const git = await rpc(local, 'git.status', { cwd: ROOT });
 check(git.available && git.repo === true || git.repo === false, `git.status ok (repo=${git.repo})`);
+const rescan = await rpc(local, 'tools.rescan');
+check(rescan && 'claude' in rescan && 'git' in rescan, `tools.rescan ok (git=${rescan?.git ? 'found' : 'missing'}, agents=${['claude', 'codex', 'opencode'].filter((t) => rescan?.[t]).join(',') || 'none'})`);
 const ls = await rpc(local, 'fs.list', { path: '~' });
 check(ls.path === os.homedir(), 'fs.list ~');
 await rpc(local, 'session.remove', { session: sess.id });

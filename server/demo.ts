@@ -1,0 +1,94 @@
+// Demo mode (HOSTLER_DEMO=1): synthetic machines/agents so the UI can be explored (and screenshotted) without any SSH host.
+import type { MachineState, SessionInfo, WorkspaceConfig } from '../shared/types';
+
+const now = () => Date.now() / 1000;
+const iso = (secAgo: number) => new Date(Date.now() - secAgo * 1000).toISOString();
+
+function session(p: Partial<SessionInfo> & { id: string; name: string; type: SessionInfo['type']; cwd: string }): SessionInfo {
+  return {
+    workspace: p.cwd, command: p.command ?? p.type, pid: p.pid ?? 4000, status: 'running', exit_code: null, exit_signal: null,
+    created: now() - 3600, started: now() - 3600, ended: null, cols: 120, rows: 32, adopted: false, tmux_target: null, meta: {}, restarts: 0,
+    last_output: now() - 3, error: null, has_pty: true, processes: [], scrollback_bytes: 20000, activity: null, ...p,
+  };
+}
+
+export function demoMachines(): { machines: MachineState[]; workspaces: WorkspaceConfig[] } {
+  const t = now();
+  const gpu: MachineState = {
+    config: { id: 'demo-gpu', name: 'gpu-box', transport: 'ssh', host: 'gpu-box.lab', user: 'dev', createdAt: 0, keyInstalled: true },
+    status: 'connected', error: null, authMethod: 'publickey', hasPassword: false, connectedAt: Date.now() - 7200e3, lastUpdate: Date.now(),
+    hello: { version: '0.1.4', protocol: 1, pid: 2211, hostname: 'gpu-box', user: 'dev', home: '/home/dev', shell: '/bin/zsh', os: 'Ubuntu 24.04 LTS', arch: 'x86_64', python: '3.12.3',
+      tools: { claude: '/home/dev/.local/bin/claude', codex: '/home/dev/.local/bin/codex', opencode: null, tmux: '/usr/bin/tmux', git: '/usr/bin/git', 'nvidia-smi': '/usr/bin/nvidia-smi', python3: '/usr/bin/python3' },
+      subreaper: true, gpu_kind: 'nvidia', sock: '/home/dev/.hostler/helper.sock', started: t - 7200 },
+    resources: { cpu_pct: 37, cores: 32, load: [11.2, 9.8, 7.1], mem_total: 128e9, mem_used: 61e9, mem_available: 67e9, swap_total: 8e9, swap_used: 0.4e9,
+      disk: { path: '/home/dev', total: 2e12, free: 0.9e12 }, uptime: 86400 * 12,
+      gpus: [{ index: 0, name: 'NVIDIA RTX 6000 Ada', util: 91, mem_used: 38e9, mem_total: 48e9, temp: 71, power: 265 }, { index: 1, name: 'NVIDIA RTX 6000 Ada', util: 4, mem_used: 2e9, mem_total: 48e9, temp: 41, power: 30 }], gpu_kind: 'nvidia' },
+    discovered: [{ pid: 8811, type: 'codex', cmd: 'codex --full-auto', args: '--full-auto', cwd: '/home/dev/scratch', started: t - 900, tty: '/dev/pts/7', tmux_target: 'main:2.0', cpu: 1.2, rss: 180e6, background: false, user: 'dev' }],
+    sessions: [
+      session({ id: 'd1', name: 'refactor data loader', type: 'claude', cwd: '/home/dev/src/vision-pipeline', command: 'claude --session-id 5e1c…', pid: 5101,
+        processes: [
+          { pid: 5101, ppid: 2211, name: 'node', state: 'S', cmd: 'claude --session-id 5e1c…', cpu: 12, rss: 420e6, started: t - 3600, detached: false, root: true },
+          { pid: 5188, ppid: 5101, name: 'bash', state: 'S', cmd: 'bash -c pytest tests/loader -x', cpu: 0.4, rss: 8e6, started: t - 40, detached: false, root: false },
+          { pid: 5190, ppid: 5188, name: 'python', state: 'R', cmd: 'python -m pytest tests/loader -x', cpu: 98, rss: 1.2e9, gpu_mem: 3.1e9, started: t - 39, detached: false, root: false },
+        ],
+        activity: { kind: 'claude', status: 'tool', current_tool: { id: 't', name: 'Bash', summary: 'pytest tests/loader -x', ts: iso(40) }, pending_tools: [{ name: 'Bash', summary: 'pytest tests/loader -x' }],
+          last_text: 'The shuffling bug is in `Prefetcher.__iter__`; running the loader tests before touching the batching code.', last_prompt: 'Make the data loader deterministic under num_workers>0', last_ts: iso(40),
+          model: 'claude-opus-5', usage: { input: 1200, output: 18400, cache_read: 412000 }, title: 'Deterministic data loader', turns: 6, tool_calls: 74, session_id: '5e1c0a9b-1', transcript: null, age: 40,
+          subagents: [
+            { id: 'a1', type: 'Explore', description: 'Trace seed handling across workers', started: iso(300), status: 'running', async: true,
+              activity: { status: 'tool', current_tool: { name: 'Grep', summary: 'torch.manual_seed|worker_init_fn' }, pending_tools: [], last_text: null, last_prompt: null, last_ts: iso(5), model: 'claude-sonnet-5', usage: null, title: null, turns: 1, tool_calls: 23 } },
+            { id: 'a2', type: 'general-purpose', description: 'Write regression test for shuffle order', started: iso(620), status: 'completed',
+              activity: { status: 'idle', current_tool: null, pending_tools: [], last_text: 'Added tests/loader/test_shuffle_determinism.py (3 cases).', last_prompt: null, last_ts: iso(200), model: 'claude-sonnet-5', usage: null, title: null, turns: 1, tool_calls: 17 } },
+          ] } }),
+      session({ id: 'd2', name: 'train resnet-50 (seed 3)', type: 'custom', cwd: '/home/dev/src/vision-pipeline', command: 'python train.py --config cfg/r50.yaml --seed 3', pid: 6120, created: now() - 5 * 3600, started: now() - 5 * 3600,
+        processes: [
+          { pid: 6120, ppid: 2211, name: 'python', state: 'R', cmd: 'python train.py --config cfg/r50.yaml --seed 3', cpu: 310, rss: 9.4e9, gpu_mem: 34.9e9, started: t - 5 * 3600, detached: false, root: true },
+          { pid: 6131, ppid: 6120, name: 'python', state: 'S', cmd: 'python -c from multiprocessing.spawn import spawn_main', cpu: 45, rss: 1.1e9, started: t - 5 * 3600 + 20, detached: false, root: false },
+          { pid: 6132, ppid: 6120, name: 'python', state: 'S', cmd: 'python -c from multiprocessing.spawn import spawn_main', cpu: 44, rss: 1.1e9, started: t - 5 * 3600 + 20, detached: false, root: false },
+          { pid: 6300, ppid: 0, name: 'tensorboard', state: 'S', cmd: 'tensorboard --logdir runs --port 6006', cpu: 0.6, rss: 210e6, started: t - 4 * 3600, detached: true, root: false },
+        ] }),
+      session({ id: 'd3', name: 'codex: API docs', type: 'codex', cwd: '/home/dev/src/api-gateway', command: 'codex', pid: 7010, created: now() - 1800, started: now() - 1800,
+        processes: [{ pid: 7010, ppid: 2211, name: 'codex', state: 'S', cmd: 'codex', cpu: 0.3, rss: 260e6, started: t - 1800, detached: false, root: true }],
+        activity: { kind: 'codex', status: 'idle', current_tool: null, pending_tools: [], last_text: 'Docs regenerated for all 14 endpoints; two examples still reference the v1 auth header — want me to update them?', last_prompt: 'Regenerate the OpenAPI docs from the handlers', last_ts: iso(400), model: 'gpt-5.6', usage: { input: 900000, output: 6100, cache_read: 620000, total: 906100 }, title: 'Regenerate API docs', turns: 3, tool_calls: 28, session_id: '0190-codex', transcript: null, age: 400, subagents: [] } }),
+      session({ id: 'd4', name: 'flaky test hunt', type: 'claude', cwd: '/home/dev/src/api-gateway', command: 'claude --session-id 77ab…', pid: 0, status: 'exited', exit_code: 0, ended: now() - 5400, created: now() - 9000, started: now() - 9000, has_pty: false, activity: null }),
+    ],
+    history: Array.from({ length: 60 }, (_, i) => ({ t: Date.now() - (60 - i) * 2000, cpu: 30 + 12 * Math.sin(i / 5) + (i % 3), mem: 47 + (i % 4), gpu: 85 + 8 * Math.sin(i / 3), vram: 78 + (i % 2) })),
+  };
+  const jetson: MachineState = {
+    config: { id: 'demo-jetson', name: 'jetson-orin', transport: 'ssh', host: '10.0.0.42', user: 'nvidia', proxyJump: 'dev@lab-gw', createdAt: 0 },
+    status: 'connected', error: null, authMethod: 'publickey', hasPassword: false, connectedAt: Date.now() - 600e3, lastUpdate: Date.now(),
+    hello: { version: '0.1.4', protocol: 1, pid: 1499, hostname: 'jetson-orin', user: 'nvidia', home: '/home/nvidia', shell: '/bin/bash', os: 'Ubuntu 22.04 LTS (JetPack 6)', arch: 'aarch64', python: '3.10.12',
+      tools: { claude: '/home/nvidia/.npm-global/bin/claude', codex: null, opencode: null, tmux: null, git: '/usr/bin/git', 'nvidia-smi': null, python3: '/usr/bin/python3' }, subreaper: true, gpu_kind: 'jetson', sock: '/home/nvidia/.hostler/helper.sock', started: t - 600 },
+    resources: { cpu_pct: 62, cores: 12, load: [7.9, 6.2, 5.0], mem_total: 64e9, mem_used: 21e9, mem_available: 43e9, swap_total: 32e9, swap_used: 0, disk: { path: '/home/nvidia', total: 1e12, free: 0.6e12 }, uptime: 86400 * 3,
+      gpus: [{ index: 0, name: 'NVIDIA Jetson AGX Orin', util: 54, mem_used: 21e9, mem_total: 64e9, temp: 58, power: null, shared: true }], gpu_kind: 'jetson' },
+    discovered: [],
+    sessions: [
+      session({ id: 'j1', name: 'port inference node', type: 'claude', cwd: '/home/nvidia/ros2_ws', command: 'claude --session-id 9c0d…', pid: 3311,
+        processes: [{ pid: 3311, ppid: 1499, name: 'node', state: 'S', cmd: 'claude --session-id 9c0d…', cpu: 6, rss: 380e6, started: t - 1200, detached: false, root: true }],
+        activity: { kind: 'claude', status: 'thinking', current_tool: null, pending_tools: [], last_text: null, last_prompt: 'Port the TensorRT inference node to ROS 2 Humble and keep latency under 20 ms', last_ts: iso(8), model: 'claude-opus-5', usage: { input: 800, output: 5200, cache_read: 150000 }, title: 'ROS 2 inference node', turns: 2, tool_calls: 31, session_id: '9c0d…', transcript: null, age: 8, subagents: [] } }),
+    ],
+    history: Array.from({ length: 60 }, (_, i) => ({ t: Date.now() - (60 - i) * 2000, cpu: 55 + 10 * Math.sin(i / 4), mem: 33, gpu: 50 + 20 * Math.sin(i / 6), vram: 33 })),
+  };
+  const laptop: MachineState = {
+    config: { id: 'demo-ws', name: 'lab-workstation', transport: 'ssh', host: 'lab-ws-03', user: 'dev', createdAt: 0 },
+    status: 'error', error: 'connection lost', needsPassword: false, hasPassword: false, sessions: [], discovered: [],
+  };
+  const workspaces: WorkspaceConfig[] = [
+    { id: 'w1', machineId: 'demo-gpu', path: '/home/dev/src/vision-pipeline', name: 'vision-pipeline', createdAt: 0 },
+    { id: 'w2', machineId: 'demo-gpu', path: '/home/dev/src/api-gateway', name: 'api-gateway', createdAt: 0 },
+    { id: 'w3', machineId: 'demo-jetson', path: '/home/nvidia/ros2_ws', name: 'ros2_ws', createdAt: 0 },
+  ];
+  return { machines: [gpu, jetson, laptop], workspaces };
+}
+
+/** Jitter resource numbers a little so the demo feels alive. */
+export function tickDemo(m: MachineState) {
+  const r = m.resources;
+  if (!r) return;
+  const j = (v: number, a: number, lo = 0, hi = 100) => Math.max(lo, Math.min(hi, v + (Math.random() - 0.5) * a));
+  r.cpu_pct = j(r.cpu_pct, 6);
+  for (const g of r.gpus) if (g.util != null) g.util = j(g.util, 8);
+  const g = r.gpus[0];
+  m.history = [...(m.history || []).slice(-119), { t: Date.now(), cpu: r.cpu_pct, mem: (100 * r.mem_used) / r.mem_total, gpu: g?.util ?? 0, vram: g ? (100 * g.mem_used) / g.mem_total : 0 }];
+  m.lastUpdate = Date.now();
+}

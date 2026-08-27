@@ -1,0 +1,66 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    name: typecheck · build · helper · e2e
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run build
+
+      - name: Helper stays Python 3.6 compatible (syntax)
+        run: python3 -c "import ast; ast.parse(open('helper/hostler_helper.py').read(), feature_version=(3, 6))"
+      - name: Transcript introspectors (synthetic fixtures)
+        run: python3 helper/test_introspect.py
+      - name: Helper daemon (PTY, attribution, git, fs, discovery)
+        run: python3 helper/test_helper.py
+
+      - name: Enable key-based ssh to localhost
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq openssh-server
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          ssh-keygen -t ed25519 -N '' -f ~/.ssh/id_ed25519 -q
+          cat ~/.ssh/id_ed25519.pub >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys
+          sudo systemctl start ssh || sudo service ssh start
+          ssh -o StrictHostKeyChecking=accept-new localhost 'echo ssh ok'
+      - name: End-to-end over the websocket protocol (local + ssh machine)
+        run: node test/e2e.mjs localhost
+      - name: Auth, encrypted secrets, ssh-copy-id flow
+        run: node test/auth.mjs localhost
+
+  package-smoke:
+    name: electron-builder (linux)
+    runs-on: ubuntu-latest
+    needs: test
+    if: github.event_name == 'push'
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - run: npx electron-builder --linux AppImage --publish never
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hostler-linux-appimage
+          path: release/*.AppImage
+          if-no-files-found: error

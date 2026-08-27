@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# One-shot launcher: installs deps if missing, rebuilds when sources changed, then starts the app.
+#   ./bin/hostler          Electron desktop window
+#   ./bin/hostler --web    headless control plane + opens http://127.0.0.1:7788 in your browser
+#   ./bin/hostler --dev    hot-reload dev mode (server + vite + electron in this terminal)
+set -e
+cd "$(dirname "$0")/.."
+if [ ! -d node_modules ]; then echo "[hostler] installing dependencies..."; npm install; fi
+if [ "$1" = "--dev" ] || [ "$1" = "-d" ]; then exec npm run dev; fi
+if [ ! -f dist/.built ] || [ -n "$(find server ui/src ui/index.html shared electron helper package.json vite.config.ts -type f -newer dist/.built -print -quit 2>/dev/null)" ]; then
+  echo "[hostler] building..."
+  npm run build --silent
+  touch dist/.built
+fi
+case "$1" in
+  --web|-w) shift; HOSTLER_OPEN=1 exec node dist/server/index.js "$@" ;;
+  *) exec npx electron . "$@" ;;
+esac

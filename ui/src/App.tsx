@@ -1,10 +1,10 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { api, useAppState, useApiMeta } from './api';
 import { Sidebar } from './components/Sidebar';
 import { MachineView } from './components/MachineView';
 import { AgentView } from './components/AgentView';
 import { WorkspaceView } from './components/WorkspaceView';
-import { AddMachineModal, NewAgentModal, ConfirmModal, EditMachineModal } from './components/modals';
+import { AddMachineModal, NewAgentModal, ConfirmModal, EditMachineModal, InstallToolModal } from './components/modals';
 import { Icon } from './components/icons';
 
 export type Selection = { machineId: string; workspace?: string; sessionId?: string } | null;
@@ -12,6 +12,7 @@ export type Modal =
   | { type: 'addMachine' }
   | { type: 'editMachine'; machineId: string }
   | { type: 'newAgent'; machineId: string; cwd?: string }
+  | { type: 'installTool'; machineId: string; tool: string }
   | { type: 'confirm'; title: string; text: string; danger?: boolean; onOk: () => void }
   | null;
 
@@ -36,10 +37,19 @@ export function App() {
   const machine = sel ? state.machines.find((m) => m.config.id === sel.machineId) : undefined;
   const session = machine && sel?.sessionId ? machine.sessions.find((s) => s.id === sel.sessionId) : undefined;
 
+  // a session just created (New Agent, resume, install) is selected before the control plane
+  // has broadcast it — give it a moment before deciding it does not exist
+  const awaiting = useRef<{ id: string; until: number } | null>(null);
+  useEffect(() => { if (sel?.sessionId) awaiting.current = { id: sel.sessionId, until: Date.now() + 5000 }; }, [sel?.sessionId]);
+
   useEffect(() => {
     if (!state.version) return; // state not received yet — keep the deep-linked / remembered selection
     if (sel && !machine) setSel(null);
-    else if (sel?.sessionId && machine && !session && machine.status === 'connected') setSel({ machineId: machine.config.id, workspace: sel.workspace });
+    else if (sel?.sessionId && machine && !session && machine.status === 'connected') {
+      const a = awaiting.current;
+      if (a && a.id === sel.sessionId && Date.now() < a.until) return;
+      setSel({ machineId: machine.config.id, workspace: sel.workspace });
+    }
   }, [sel, machine, session, state.version]);
 
   return (
@@ -62,6 +72,7 @@ export function App() {
         {modal?.type === 'addMachine' && <AddMachineModal onClose={() => setModal(null)} />}
         {modal?.type === 'editMachine' && <EditMachineModal machine={state.machines.find((m) => m.config.id === modal.machineId)!} onClose={() => setModal(null)} />}
         {modal?.type === 'newAgent' && <NewAgentModal machine={state.machines.find((m) => m.config.id === modal.machineId)!} workspaces={state.workspaces.filter((w) => w.machineId === modal.machineId)} cwd={modal.cwd} onClose={() => setModal(null)} onCreated={(sid) => { setModal(null); setSel({ machineId: modal.machineId, sessionId: sid }); }} />}
+        {modal?.type === 'installTool' && <InstallToolModal machine={state.machines.find((m) => m.config.id === modal.machineId)!} tool={modal.tool} onClose={() => setModal(null)} onCreated={(sid) => { setModal(null); setSel({ machineId: modal.machineId, sessionId: sid }); }} />}
         {modal?.type === 'confirm' && <ConfirmModal title={modal.title} text={modal.text} danger={modal.danger} onOk={() => { setModal(null); modal.onOk(); }} onClose={() => setModal(null)} />}
         <Toasts />
       </div>

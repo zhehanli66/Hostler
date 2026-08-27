@@ -1,10 +1,10 @@
 import React, { useContext, useEffect, useState } from 'react';
-import type { DiscoveredProcess, MachineState, WorkspaceConfig } from '@shared/types';
+import type { AgentType, DiscoveredProcess, MachineState, WorkspaceConfig } from '@shared/types';
 import { AppCtx } from '../App';
 import { SessionTable } from './SessionTable';
 import { Icon, Sparkline, TypeAvatar } from './icons';
 import { api, useAppState } from '../api';
-import { ago, classNames, fmtBytes, fmtDuration, pct, sessionTone, shortPath, TYPE_LABEL } from '../util';
+import { ago, classNames, fmtBytes, fmtDuration, pct, sessionTone, shortPath, tailPath, TYPE_LABEL } from '../util';
 
 export function MachineView({ machine: m, workspaces }: { machine: MachineState; workspaces: WorkspaceConfig[] }) {
   const { openModal, select } = useContext(AppCtx);
@@ -66,6 +66,8 @@ export function MachineView({ machine: m, workspaces }: { machine: MachineState;
             </div>
           ) : <div className="empty">{connected ? 'waiting for data…' : 'not connected'}</div>}
         </div>
+
+        <ToolsCard m={m} />
 
         <div className="card" style={{ marginBottom: 14 }}>
           <h3><Icon name="bot" size={13} /> Agents by workspace <span className="sub">{m.sessions.length} agent(s) in {groups.length} workspace(s)</span><span className="spacer" />
@@ -191,10 +193,57 @@ function WorkspaceGroup({ m, path, name, pinned, sessions, home, connected }: { 
   );
 }
 
+const AGENT_TOOLS: AgentType[] = ['claude', 'codex', 'opencode'];
+
+/** Which agent CLIs exist on the machine, with a one-click installer for the missing ones. */
+function ToolsCard({ m }: { m: MachineState }) {
+  const { openModal } = useContext(AppCtx);
+  const connected = m.status === 'connected';
+  const tools = m.hello?.tools || {};
+  const home = m.hello?.home;
+  const [scanning, setScanning] = useState(false);
+  const rescan = () => {
+    if (!connected) return;
+    setScanning(true);
+    api.rpc(m.config.id, 'tools.rescan').catch(() => undefined).then(() => setScanning(false));
+  };
+  const missing = AGENT_TOOLS.filter((t) => !tools[t]);
+  // picks up a CLI installed a moment ago (or by hand) without reconnecting the machine
+  useEffect(() => { if (connected && missing.length) rescan(); }, [connected, m.config.id]);
+  return (
+    <div className="card" style={{ marginBottom: 14 }}>
+      <h3><Icon name="terminal" size={13} /> Agent CLIs
+        <span className="sub">{missing.length ? `${missing.length} of ${AGENT_TOOLS.length} not installed for ${m.hello?.user || 'this user'}` : `all installed for ${m.hello?.user || 'this user'}`}</span>
+        <span className="spacer" />
+        <button className="btn sm ghost icon" title="Re-scan the machine" disabled={!connected || scanning} onClick={rescan}><Icon name="refresh" size={13} /></button>
+      </h3>
+      <div className="tools">
+        {AGENT_TOOLS.map((t) => (
+          <div className="tool" key={t}>
+            <TypeAvatar type={t} size={26} />
+            <div className="t">
+              <b>{TYPE_LABEL[t]}</b>
+              <span className="p" title={tools[t] || ''}>{tools[t] ? tailPath(shortPath(tools[t]!, home), 30) : 'not installed'}</span>
+            </div>
+            <button className={classNames('btn sm', tools[t] ? 'ghost icon' : 'primary')} disabled={!connected}
+              title={tools[t] ? `Reinstall / update ${TYPE_LABEL[t]}` : `Install ${TYPE_LABEL[t]} on ${m.config.name}`}
+              onClick={() => openModal({ type: 'installTool', machineId: m.config.id, tool: t })}>
+              <Icon name="download" size={13} />{tools[t] ? '' : ' Install'}
+            </button>
+          </div>
+        ))}
+      </div>
+      <div className="muted small" style={{ marginTop: 9 }}>
+        {['git', 'tmux', 'curl', 'npm', 'nvidia-smi'].map((t) => `${t} ${tools[t] ? '✓' : '—'}`).join('   ·   ')}
+        {' · '}agents installed anywhere Hostler probes (PATH, ~/.local/bin, nvm/npm prefixes, IDE extension bundles) are found automatically.
+      </div>
+    </div>
+  );
+}
+
 function Gauge({ icon, label, value, sub, p, cls, spark, sparkColor }: { icon: 'cpu' | 'memory' | 'gpu' | 'disk' | 'clock'; label: string; value: string; sub?: string; p: number; cls?: string; spark?: number[]; sparkColor?: string }) {
   return (
     <div className="gauge">
-      {spark && spark.length > 1 && <Sparkline values={spark} width={84} height={28} color={sparkColor || 'var(--accent)'} />}
       <div className="label"><span><Icon name={icon} size={12} /> {label}</span><span>{p > 0 ? `${p.toFixed(0)}%` : ''}</span></div>
       <div className="value">{value}</div>
       <div className={classNames('bar', cls, p > 90 ? 'crit' : p > 75 ? 'warn' : '')}><i style={{ width: `${Math.min(100, p)}%` }} /></div>

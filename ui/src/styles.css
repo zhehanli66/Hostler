@@ -146,6 +146,11 @@ svg { flex: none; }
 /* the trend line is its own row at the bottom of the card — never behind the value */
 .gauge .spark-wrap { margin-top: auto; padding-top: 9px; }
 .gauge .spark { display: block; width: 100%; height: 26px; opacity: .9; pointer-events: none; }
+.tools { display: grid; grid-template-columns: repeat(auto-fill, minmax(336px, 1fr)); gap: 10px; }
+.tool { display: flex; align-items: center; gap: 10px; background: var(--elev); border: 1px solid var(--border); border-radius: 10px; padding: 9px 10px; }
+.tool .t { display: flex; flex-direction: column; min-width: 0; flex: 1; }
+.tool .t b { font-size: 12.5px; }
+.tool .t .p { font-family: var(--mono); font-size: 11px; color: var(--fg-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .bar { height: 5px; background: var(--elev-2); border-radius: 3px; overflow: hidden; }
 .bar > i { display: block; height: 100%; background: linear-gradient(90deg, var(--accent-2), var(--accent)); border-radius: 3px; transition: width .5s; }
 .bar.warn > i { background: var(--busy); } .bar.crit > i { background: var(--error); }

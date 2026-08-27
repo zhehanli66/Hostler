@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import type { AgentType, FsList, MachineState, SshHostEntry, WorkspaceConfig } from '@shared/types';
 import { api, useAppState } from '../api';
-import { classNames, shortPath, TYPE_LABEL } from '../util';
+import { classNames, installCommand, shortPath, TYPE_LABEL } from '../util';
 import { Icon, TypeAvatar } from './icons';
 
 export function Modal({ title, children, footer, onClose, wide }: { title: string; children: React.ReactNode; footer?: React.ReactNode; onClose: () => void; wide?: boolean }) {
@@ -195,6 +195,38 @@ export function NewAgentModal({ machine, workspaces, cwd, onClose, onCreated }: 
         {type === 'custom' && <div className="field"><label>Command</label><input value={command} placeholder="python train.py --epochs 10" onChange={(e) => setCommand(e.target.value)} /></div>}
       </div>
       <div className="muted small">The command runs in a persistent PTY through your login shell on the machine (so PATH, nvm, auth and MCP config are exactly what you get in a normal terminal). It keeps running when you close this app or lose the SSH connection.</div>
+    </Modal>
+  );
+}
+
+/** Install an agent CLI on a machine: runs the official installer as a normal terminal session. */
+export function InstallToolModal({ machine, tool, onClose, onCreated }: { machine: MachineState; tool: string; onClose: () => void; onCreated: (sid: string) => void }) {
+  const tools = machine.hello?.tools || {};
+  const home = machine.hello?.home || '~';
+  const [cmd, setCmd] = useState(() => installCommand(tool));
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState('');
+  const run = async () => {
+    setBusy(true);
+    try {
+      const spec = { type: 'custom' as AgentType, name: `install ${TYPE_LABEL[tool] || tool}`, cwd: home, workspace: home, command: cmd.trim(), cols: 120, rows: 32 };
+      const r = await api.rpc(machine.config.id, 'session.create', { spec });
+      onCreated(r.id);
+    } catch (e: any) { setErr(e.message); } finally { setBusy(false); }
+  };
+  return (
+    <Modal title={`Install ${TYPE_LABEL[tool] || tool} on ${machine.config.name}`} onClose={onClose} wide
+      footer={<><span className="err">{err}</span><button className="btn" onClick={onClose}>Cancel</button>
+        <button className="btn primary" disabled={busy || !cmd.trim()} onClick={run}><Icon name="download" size={14} /> Run install</button></>}>
+      <div className="field">
+        <label>Command</label>
+        <textarea style={{ height: 92, padding: '8px 10px', fontFamily: 'var(--mono)', fontSize: 12, lineHeight: 1.5, resize: 'vertical' }}
+          value={cmd} onChange={(e) => setCmd(e.target.value)} spellCheck={false} />
+      </div>
+      <div className="muted small">
+        Runs as a normal Hostler session in {shortPath(home, home)} through {machine.hello?.user ? `${machine.hello.user}'s` : 'the'} login shell — watch the output and answer prompts in the terminal.
+        The official installer, no sudo: it installs into ~/.local/bin, which Hostler probes even when it is not on PATH. Edit the command if you prefer another route (npm, a package manager, a specific version).{tools.curl ? '' : ' curl was not found on this machine — install it first, or edit the command.'}
+      </div>
     </Modal>
   );
 }

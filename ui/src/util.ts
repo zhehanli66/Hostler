@@ -64,8 +64,26 @@ export function runningSubagents(s: SessionInfo): Subagent[] {
 
 export function classNames(...xs: (string | false | null | undefined)[]) { return xs.filter(Boolean).join(' '); }
 
+/** keep the tail of a long path (the interesting end), with a leading ellipsis */
+export function tailPath(p: string, max = 36) {
+  return p.length <= max ? p : '…' + p.slice(p.length - max);
+}
+
 export function shortPath(p?: string | null, home?: string | null) {
   if (!p) return '';
   if (home && p.startsWith(home)) return '~' + p.slice(home.length);
   return p;
+}
+
+/**
+ * Official install command per agent CLI — shown in the dialog and editable before it runs.
+ * All three install for the machine's own user (no sudo) into ~/.local/bin, which Hostler probes
+ * even when it is not on PATH; the codex installer also lays down its `codex-code-mode-host`
+ * companion, which a bare binary drop would miss.
+ */
+export function installCommand(tool: string): string {
+  if (tool === 'claude') return 'curl -fsSL https://claude.ai/install.sh | bash';
+  if (tool === 'codex') return 'curl -fsSL https://chatgpt.com/codex/install.sh | sh';
+  if (tool === 'opencode') return 'curl -fsSL https://opencode.ai/install | bash';
+  return '';
 }

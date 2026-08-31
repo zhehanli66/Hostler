@@ -49,7 +49,7 @@ export function demoMachines(): { machines: MachineState[]; workspaces: Workspac
         ] }),
       session({ id: 'd3', name: 'codex: API docs', type: 'codex', cwd: '/home/dev/src/api-gateway', command: 'codex', pid: 7010, created: now() - 1800, started: now() - 1800,
         processes: [{ pid: 7010, ppid: 2211, name: 'codex', state: 'S', cmd: 'codex', cpu: 0.3, rss: 260e6, started: t - 1800, detached: false, root: true }],
-        activity: { kind: 'codex', status: 'idle', current_tool: null, pending_tools: [], last_text: 'Docs regenerated for all 14 endpoints; two examples still reference the v1 auth header — want me to update them?', last_prompt: 'Regenerate the OpenAPI docs from the handlers', last_ts: iso(400), model: 'gpt-5.6', usage: { input: 900000, output: 6100, cache_read: 620000, total: 906100 }, title: 'Regenerate API docs', turns: 3, tool_calls: 28, session_id: '0190-codex', transcript: null, age: 400, subagents: [] } }),
+        activity: { kind: 'codex', status: 'idle', current_tool: null, pending_tools: [], last_text: 'Docs regenerated for all 14 endpoints; two examples still reference the v1 auth header — want me to update them?', last_prompt: 'Regenerate the OpenAPI docs from the handlers', last_ts: iso(400), model: 'gpt-5.6-sol', usage: { input: 900000, output: 6100, cache_read: 620000, total: 906100 }, title: 'Regenerate API docs', turns: 3, tool_calls: 28, session_id: '0190-codex', transcript: null, age: 400, subagents: [] } }),
       session({ id: 'd4', name: 'flaky test hunt', type: 'claude', cwd: '/home/dev/src/api-gateway', command: 'claude --session-id 77ab…', pid: 0, status: 'exited', exit_code: 0, ended: now() - 5400, created: now() - 9000, started: now() - 9000, has_pty: false, activity: null }),
     ],
     history: Array.from({ length: 60 }, (_, i) => ({ t: Date.now() - (60 - i) * 2000, cpu: 30 + 12 * Math.sin(i / 5) + (i % 3), mem: 47 + (i % 4), gpu: 85 + 8 * Math.sin(i / 3), vram: 78 + (i % 2) })),
@@ -137,7 +137,7 @@ export function demoHistory(cwd: string) {
   const rows: { type: 'claude' | 'codex'; session_id: string; title: string; prompt: string; ago: number; size: number; model: string; branch: string }[] = [
     { type: 'claude', session_id: '5e1c0a9b-1', title: 'Deterministic data loader', prompt: 'Make the data loader deterministic under num_workers>0', ago: 40, size: 2.1e6, model: 'claude-opus-5', branch: 'fix/loader-seed' },
     { type: 'claude', session_id: 'c31f77ae-9', title: 'Mixed-precision training pass', prompt: 'Switch the trainer to bf16 and check for loss spikes', ago: 26 * 3600, size: 5.4e6, model: 'claude-opus-5', branch: 'main' },
-    { type: 'codex', session_id: '0190-codex', title: 'Regenerate API docs', prompt: 'Regenerate the OpenAPI docs from the handlers', ago: 400, size: 0.9e6, model: 'gpt-5.6', branch: 'main' },
+    { type: 'codex', session_id: '0190-codex', title: 'Regenerate API docs', prompt: 'Regenerate the OpenAPI docs from the handlers', ago: 400, size: 0.9e6, model: 'gpt-5.6-sol', branch: 'main' },
     { type: 'claude', session_id: 'ab77e201-4', title: 'Flaky test hunt', prompt: 'tests/loader/test_shuffle.py fails once every ~20 runs — find out why', ago: 5 * 86400, size: 3.2e6, model: 'claude-sonnet-5', branch: 'main' },
   ];
   return rows.map((r) => ({

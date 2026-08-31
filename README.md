@@ -45,9 +45,10 @@ Machine  →  Workspace (a directory)  →  Agent (persistent PTY)  →  Subagen
   replies, collapsed reasoning, and every tool call with its output — with a composer at the bottom. Typing there
   goes to the real CLI over the PTY, so the **Terminal** tab is still there for permission prompts and the TUI.
 - **Know what it costs.** A **Usage** view rolls every connected machine's transcripts up into today / this week /
-  this month, by day, week or month, broken down by model, agent and conversation. Anthropic list prices ship with
-  Hostler (cache reads and 5-minute vs 1-hour cache writes billed apart); other providers' models show tokens until
-  you give them a price.
+  this month, by day, week or month, broken down by model, agent and conversation. Anthropic and OpenAI/Codex API
+  list prices ship with Hostler (including provider-specific cache rates); other providers' models show tokens until
+  you give them a price. The hidden `codex-auto-review` id uses `gpt-5.6-luna` as a disclosed proxy because it has no
+  published standalone rate. Costs are API-equivalent estimates, not subscription, workspace-credit or invoice data.
 - **Native terminal** (xterm.js) plus one-line input, `^C`, `Esc`; **Stop / Kill / Restart** (Claude Code restarts with
   `--resume`); **Git status & diff** per workspace; **CPU / RAM / GPU / VRAM** per machine (NVIDIA via `nvidia-smi`, Jetson via sysfs).
 - **Cluster login nodes.** A machine with a scheduler client on it gets a **Cluster** view:

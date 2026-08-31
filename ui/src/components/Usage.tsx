@@ -1,6 +1,8 @@
 import React, { useContext, useEffect, useMemo, useState } from 'react';
 import type { AppState, UsageReport } from '@shared/types';
-import { BUILTIN_PRICES, PRICES_CHECKED, priceFor, type ModelPrice } from '@shared/pricing';
+import {
+  ANTHROPIC_PRICES_CHECKED, BUILTIN_PRICES, OPENAI_PRICES_CHECKED, priceFor, type ModelPrice,
+} from '@shared/pricing';
 import { AppCtx } from '../App';
 import { api } from '../api';
 import { classNames, shortPath, TYPE_LABEL } from '../util';
@@ -82,7 +84,7 @@ export function UsageView({ state }: { state: AppState }) {
         ))}
 
         <div className="gauges" style={{ marginBottom: 14 }}>
-          <Stat label="Cost" value={fmtUsd(r.total.cost)} sub={r.total.unpriced ? `+ ${fmtTokens(r.total.unpriced)} unpriced tokens` : `${fmtUsd(r.total.cost / days)} / ${bucket}`} />
+          <Stat label="Est. cost" value={fmtUsd(r.total.cost)} sub={r.total.unpriced ? `+ ${fmtTokens(r.total.unpriced)} unpriced tokens` : `${fmtUsd(r.total.cost / days)} / ${bucket}`} />
           <Stat label="Tokens" value={fmtTokens(rowTokens(r.total))} sub={`${fmtTokens(r.total.input)} in · ${fmtTokens(r.total.output)} out`} />
           <Stat label="Cache" value={fmtTokens(r.total.cacheRead)} sub={`read · ${fmtTokens(r.total.cacheWrite)} written`} />
           <Stat label="Requests" value={r.total.messages.toLocaleString()} sub={`across ${r.sessions.length} conversation${r.sessions.length === 1 ? '' : 's'}`} />
@@ -90,7 +92,7 @@ export function UsageView({ state }: { state: AppState }) {
 
         <div className="card" style={{ marginBottom: 14 }}>
           <h3>
-            <Icon name="activity" size={13} /> Spend by {bucket}
+            <Icon name="activity" size={13} /> Estimated spend by {bucket}
             <span className="spacer" />
             <span className="sub">peak {fmtUsd(Math.max(0, ...r.slices.map((s) => s.cost)))}</span>
             <div className="seg sm">{BUCKETS.map((b) => <button key={b} className={classNames('seg-btn', bucket === b && 'active')} onClick={() => setBucket(b)}>{b}</button>)}</div>
@@ -133,7 +135,7 @@ export function UsageView({ state }: { state: AppState }) {
             <table className="tbl">
               <thead><tr>
                 <th>Conversation</th><th>Machine</th><th className="num">In</th><th className="num">Out</th>
-                <th className="num">Cache r/w</th><th className="num">Reqs</th><th className="num">Cost</th>
+                <th className="num">Cache r/w</th><th className="num">Reqs</th><th className="num">Est. cost</th>
               </tr></thead>
               <tbody>
                 {r.sessions.slice(0, 60).map((s) => (
@@ -162,8 +164,10 @@ export function UsageView({ state }: { state: AppState }) {
         </div>
 
         <div className="muted small" style={{ marginTop: 12 }}>
-          Read from each machine's own transcripts, up to {SCAN_DAYS} days back. Costs use Anthropic list prices
-          checked {PRICES_CHECKED}; models with no price show tokens only.
+          Read from each machine's own transcripts, up to {SCAN_DAYS} days back. Costs are API list-price estimates,
+          not provider invoices or subscription/credit usage. Built-in prices: Anthropic checked {ANTHROPIC_PRICES_CHECKED};
+          OpenAI checked {OPENAI_PRICES_CHECKED} using standard short-context rates. codex-auto-review has no published
+          standalone rate and is estimated at the gpt-5.6-luna rate. Models with no price show tokens only.
           {skipped > 0 && <> <b>{skipped} older transcript{skipped === 1 ? '' : 's'} were left out</b> — more than a helper scans in one pass.</>}
         </div>
       </div>
@@ -249,9 +253,11 @@ function PriceModal({ prices, models, onClose, onSave }: {
         <header><Icon name="settings" size={15} /> Model prices <span className="spacer" /><button className="btn ghost sm icon" onClick={onClose}><Icon name="x" size={14} /></button></header>
         <div className="body">
           <div className="muted small">
-            USD per million tokens. Anthropic rates ship with Hostler (checked {PRICES_CHECKED}); anything else —
-            Codex and OpenCode run on other providers — needs a price here before it can be costed. Cache reads bill at
-            0.1× input, writes at 1.25× (5&nbsp;min) and 2× (1&nbsp;hour).
+            USD per million tokens. Anthropic rates (checked {ANTHROPIC_PRICES_CHECKED}) and OpenAI/Codex standard
+            API rates (checked {OPENAI_PRICES_CHECKED}) ship with Hostler. Built-in rows include provider-specific cache
+            rates; a new custom row defaults to reads at 0.1× input and writes at 1.25× (5&nbsp;min) / 2× (1&nbsp;hour).
+            codex-auto-review uses gpt-5.6-luna as a proxy because OpenAI publishes no standalone rate for it. These are
+            estimates, not subscription or workspace-credit charges.
           </div>
           <div className="tbl-wrap">
             <table className="tbl">
